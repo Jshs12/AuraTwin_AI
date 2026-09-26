@@ -1,0 +1,112 @@
+[
+  {
+    "zone_id": "classroom_01",
+    "name": "Classroom 1",
+    "type": "classroom",
+    "capacity": 40,
+    "area_m2": 65,
+    "comfort": {
+      "min_temperature": 22,
+      "max_temperature": 26
+    }
+  },
+  {
+    "zone_id": "classroom_02",
+    "name": "Classroom 2",
+    "type": "classroom",
+    "capacity": 40,
+    "area_m2": 65,
+    "comfort": {
+      "min_temperature": 22,
+      "max_temperature": 26
+    }
+  },
+  {
+    "zone_id": "lab_01",
+    "name": "Lab 1",
+    "type": "laboratory",
+    "capacity": 20,
+    "area_m2": 50,
+    "comfort": {
+      "min_temperature": 20,
+      "max_temperature": 24
+    }
+  },
+  {
+    "zone_id": "lab_02",
+    "name": "Lab 2",
+    "type": "laboratory",
+    "capacity": 20,
+    "area_m2": 50,
+    "comfort": {
+      "min_temperature": 20,
+      "max_temperature": 24
+    }
+  },
+  {
+    "zone_id": "office_01",
+    "name": "Office 1",
+    "type": "office",
+    "capacity": 4,
+    "area_m2": 25,
+    "comfort": {
+      "min_temperature": 22,
+      "max_temperature": 25
+    }
+  },
+  {
+    "zone_id": "office_02",
+    "name": "Office 2",
+    "type": "office",
+    "capacity": 4,
+    "area_m2": 25,
+    "comfort": {
+      "min_temperature": 22,
+      "max_temperature": 25
+    }
+  },
+  {
+    "zone_id": "meeting_room_01",
+    "name": "Meeting Room",
+    "type": "meeting",
+    "capacity": 10,
+    "area_m2": 35,
+    "comfort": {
+      "min_temperature": 21,
+      "max_temperature": 25
+    }
+  },
+  {
+    "zone_id": "server_room_01",
+    "name": "Server Room",
+    "type": "server",
+    "capacity": 2,
+    "area_m2": 15,
+    "comfort": {
+      "min_temperature": 18,
+      "max_temperature": 22
+    }
+  },
+  {
+    "zone_id": "corridor_01",
+    "name": "Corridor",
+    "type": "corridor",
+    "capacity": 100,
+    "area_m2": 150,
+    "comfort": {
+      "min_temperature": 20,
+      "max_temperature": 28
+    }
+  },
+  {
+    "zone_id": "auditorium_01",
+    "name": "Auditorium",
+    "type": "auditorium",
+    "capacity": 200,
+    "area_m2": 300,
+    "comfort": {
+      "min_temperature": 21,
+      "max_temperature": 26
+    }
+  }
+]
