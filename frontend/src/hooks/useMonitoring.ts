@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { MonitoringStatus, SystemEvent } from "../types/api";
-import { api } from "../services/api";
+import { api, authSession } from "../services/api";
 import { formatISTTimestamp } from "../utils/time";
 
 const WS_BASE = `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:8000`;
@@ -67,7 +67,9 @@ export function useMonitoring() {
     const readyState = wsRef.current?.readyState;
     if (readyState === WebSocket.CONNECTING || readyState === WebSocket.OPEN) return;
 
-    const ws = new WebSocket(`${WS_BASE}/api/monitoring/ws/events`);
+    const token = authSession.getToken();
+    if (!token) return;
+    const ws = new WebSocket(`${WS_BASE}/api/monitoring/ws/events?access_token=${encodeURIComponent(token)}`);
     wsRef.current = ws;
 
     ws.onopen = () => {

@@ -8,3 +8,5 @@ httpx
 ultralytics
 opencv-python-headless
 python-multipart
+PyJWT
+argon2-cffi

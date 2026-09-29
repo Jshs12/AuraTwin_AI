@@ -1,9 +1,12 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, HTTPException
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, HTTPException, Depends
 from typing import Dict, Any
 
 from backend.core.monitoring import ZoneMonitoringScheduler
 from backend.core.mock_providers import MockEnergyStreamProvider
 from backend.core.events import EventBroadcaster
+from backend.security.dependencies import get_current_user, require_permission, require_any_permission
+from backend.security.roles import Permission, Role, has_permission
+from backend.security.repository import DEVELOPMENT_BUILDING_ID
 
 router = APIRouter(tags=["Monitoring"])
 
@@ -14,7 +17,7 @@ def get_energy_stream(request: Request) -> MockEnergyStreamProvider:
     return request.app.state.energy_stream_provider
 
 @router.get("/status")
-def get_monitoring_status(request: Request) -> dict:
+def get_monitoring_status(request: Request, _user=Depends(require_any_permission(Permission.SYSTEM_READ, Permission.BUILDING_READ))) -> dict:
     status = get_scheduler(request).get_status()
     status["occupancy_provider"] = getattr(request.app.state, "occupancy_provider_mode", "unknown")
     status["occupancy_provider_ready"] = getattr(request.app.state, "occupancy_provider_ready", False)
@@ -32,7 +35,7 @@ def get_monitoring_status(request: Request) -> dict:
     return status
 
 @router.post("/start")
-async def start_monitoring(request: Request) -> dict:
+async def start_monitoring(request: Request, user=Depends(require_permission(Permission.MONITORING_MANAGE))) -> dict:
     scheduler = get_scheduler(request)
     scenario = getattr(request.app.state, "demo_scenario", None)
     if scenario and scenario.status.value in {"RUNNING", "PAUSED"}:
@@ -49,10 +52,12 @@ async def start_monitoring(request: Request) -> dict:
             provider.reset_simulation()
     scheduler.start()
     get_energy_stream(request).start()
+    request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
+        action="monitoring_start", resource="monitoring", success=True)
     return {"status": "started"}
 
 @router.post("/stop")
-async def stop_monitoring(request: Request) -> dict:
+async def stop_monitoring(request: Request, user=Depends(require_permission(Permission.MONITORING_MANAGE))) -> dict:
     scheduler = get_scheduler(request)
     scenario = getattr(request.app.state, "demo_scenario", None)
     if scenario and scenario.status.value in {"RUNNING", "PAUSED"}:
@@ -60,10 +65,32 @@ async def stop_monitoring(request: Request) -> dict:
         scheduler.demo_mode = False
     await scheduler.stop_and_wait()
     await get_energy_stream(request).stop_and_wait()
+    request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
+        action="monitoring_stop", resource="monitoring", success=True)
     return {"status": "stopped"}
 
 @router.websocket("/ws/events")
 async def websocket_events(websocket: WebSocket):
+    token = websocket.query_params.get("access_token")
+    if not token:
+        await websocket.close(code=4401)
+        return
+    try:
+        from backend.security.jwt import decode_access_token
+        claims = decode_access_token(token)
+        user = websocket.app.state.auth_service.users.get_by_id(claims["sub"])
+        if user is None or not user.active or user.role.value != claims["role"]:
+            raise ValueError("invalid user")
+        required = Permission.EVENTS_READ if user.role == Role.ADMIN else Permission.MONITORING_MANAGE
+        if not has_permission(user.role, required):
+            await websocket.close(code=4403)
+            return
+        if user.role.value == "OPERATOR" and DEVELOPMENT_BUILDING_ID not in user.building_ids:
+            await websocket.close(code=4403)
+            return
+    except Exception:
+        await websocket.close(code=4401)
+        return
     await websocket.accept()
     
     async def send_message(message: str):

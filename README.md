@@ -188,3 +188,6 @@ docs/final_system_status.md — current integration/readiness status
 License
 
 No project license has been specified yet.
+# Authentication and access control
+
+Phase 9 adds `ADMIN` building-wide oversight and building-assigned `OPERATOR` access. Configure a strong local JWT secret and bootstrap account variables from `.env.example` before using the protected dashboard. See [docs/security_foundation.md](docs/security_foundation.md) for permissions, bootstrap steps, API boundaries, and limitations. The in-memory auth/audit repositories and simulated building integrations are development foundations, not production infrastructure.

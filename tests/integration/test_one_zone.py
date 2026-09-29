@@ -1,8 +1,9 @@
 import pytest
 from fastapi.testclient import TestClient
 from backend.api.main import app
+from tests.security_test_utils import make_client
 
-client = TestClient(app)
+client = make_client()
 
 def test_one_zone_loop():
     zone_id = "classroom_01"

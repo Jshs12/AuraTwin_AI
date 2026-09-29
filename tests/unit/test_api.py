@@ -3,8 +3,9 @@ import time
 from fastapi.testclient import TestClient
 from backend.api.main import app
 from backend.core.events import EventTrace
+from tests.security_test_utils import make_client
 
-client = TestClient(app)
+client = make_client()
 
 def test_health_check():
     response = client.get("/api/health")

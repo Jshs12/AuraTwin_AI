@@ -3,7 +3,7 @@ import { Card, OccupancyBadge, Button } from "../common";
 import { Timeline } from "../events/Timeline";
 import { CVPanel } from "../occupancy/CVPanel";
 
-export function ZoneDetail({ zoneId, demoPhase }: { zoneId: string | null; demoPhase?: string | null }) {
+export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: string | null; demoPhase?: string | null; canOperate?: boolean }) {
   const {
     state,
     history,
@@ -166,11 +166,11 @@ export function ZoneDetail({ zoneId, demoPhase }: { zoneId: string | null; demoP
       </Card>
 
       {/* CV Upload Panel */}
-      <CVPanel zoneId={zoneId} />
+      {canOperate && <CVPanel zoneId={zoneId} />}
 
       {/* Recommendation */}
       <Card title="Recommendation · advisory and safety checked">
-        {recommendation ? (
+              {recommendation ? (
           <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
             <div className="zone-stats">
               <div>
@@ -212,18 +212,18 @@ export function ZoneDetail({ zoneId, demoPhase }: { zoneId: string | null; demoP
               {recommendation.validation.rejection_reason && <div className="badge danger">Rejected: {recommendation.validation.rejection_reason}</div>}
             </div>
 
-            <Button variant="primary" onClick={applyRecommendation} disabled={loading || recommendation.validation.validated_setpoint === null}>
+            {canOperate && <Button variant="primary" onClick={applyRecommendation} disabled={loading || recommendation.validation.validated_setpoint === null}>
               {loading ? "Applying..." : "Apply Validated Recommendation (Simulated Control)"}
-            </Button>
+            </Button>}
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
             <div style={{ fontSize: "0.875rem", color: "var(--text-muted)" }}>
               No recommendation generated yet for this zone.
             </div>
-            <Button variant="neutral" onClick={generateRecommendation} disabled={loading}>
+            {canOperate && <Button variant="neutral" onClick={generateRecommendation} disabled={loading}>
               {loading ? "Generating..." : "Generate Recommendation"}
-            </Button>
+            </Button>}
           </div>
         )}
       </Card>

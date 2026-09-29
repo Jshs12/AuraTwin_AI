@@ -128,10 +128,10 @@ def test_detect_endpoint_returns_503_when_yolo_not_loaded():
     This test verifies the 503 guard does not fire for a healthy YOLO provider.
     A bad image (non-decodable bytes) in YOLO mode returns 400, not 503.
     """
-    from fastapi.testclient import TestClient
+    from tests.security_test_utils import make_client
     from backend.api.main import app, OCCUPANCY_PROVIDER_MODE, yolo_provider
 
-    client = TestClient(app)
+    client = make_client()
     import io
     fake_img = io.BytesIO(b"fakeimage_not_real_jpeg")
     response = client.post(
@@ -154,11 +154,11 @@ def test_occupancy_status_mock_mode():
     When OCCUPANCY_PROVIDER=yolo (set via .env), reports 'yolo' + readiness.
     When OCCUPANCY_PROVIDER=mock, reports 'mock'.
     """
-    from fastapi.testclient import TestClient
+    from tests.security_test_utils import make_client
     from backend.api.main import app, OCCUPANCY_PROVIDER_MODE, yolo_provider
     import os
 
-    client = TestClient(app)
+    client = make_client()
     response = client.get("/api/occupancy/status")
     assert response.status_code == 200
     data = response.json()
@@ -171,10 +171,10 @@ def test_occupancy_status_mock_mode():
 
 def test_detect_endpoint_rejects_invalid_extension():
     """The /api/occupancy/detect should reject unsupported file types."""
-    from fastapi.testclient import TestClient
+    from tests.security_test_utils import make_client
     from backend.api.main import app
 
-    client = TestClient(app)
+    client = make_client()
     import io
     fake_file = io.BytesIO(b"notanimage")
     response = client.post(
@@ -188,7 +188,7 @@ def test_detect_endpoint_rejects_invalid_extension():
 
 def test_detect_endpoint_handles_malformed_image_truthfully():
     """Malformed bytes return 400 when YOLO can decode-check them; unavailable YOLO returns 503."""
-    from fastapi.testclient import TestClient
+    from tests.security_test_utils import make_client
     from backend.api.main import app, OCCUPANCY_PROVIDER_MODE, yolo_provider
     import io
     import os
@@ -196,7 +196,7 @@ def test_detect_endpoint_handles_malformed_image_truthfully():
     # Ensure yolo mode is active so it calls the real provider or mock provider decoding
     os.environ["OCCUPANCY_PROVIDER"] = "yolo"
 
-    client = TestClient(app)
+    client = make_client()
     fake_file = io.BytesIO(b"not_a_valid_jpeg_or_png_file")
     response = client.post(
         "/api/occupancy/detect",
@@ -215,7 +215,7 @@ def test_detect_endpoint_handles_malformed_image_truthfully():
 
 
 def test_inference_endpoint_does_not_echo_internal_exception(monkeypatch):
-    from fastapi.testclient import TestClient
+    from tests.security_test_utils import make_client
     from backend.api import main
     import io
 
@@ -224,7 +224,7 @@ def test_inference_endpoint_does_not_echo_internal_exception(monkeypatch):
         raise RuntimeError(marker)
 
     monkeypatch.setattr(main.occ_prov, "detect_from_image", fail)
-    response = TestClient(main.app).post(
+    response = make_client().post(
         "/api/occupancy/detect",
         files={"file": ("test.jpg", io.BytesIO(b"some-image-bytes"), "image/jpeg")},
         data={"zone_id": "classroom_01"},

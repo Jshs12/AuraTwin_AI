@@ -7,9 +7,10 @@ interface MonitoringPanelProps {
   connected: boolean;
   onStart: () => void;
   onStop: () => void;
+  canManage?: boolean;
 }
 
-export function MonitoringPanel({ status, error, connected, onStart, onStop }: MonitoringPanelProps) {
+export function MonitoringPanel({ status, error, connected, onStart, onStop, canManage = true }: MonitoringPanelProps) {
   const running = status?.running ?? false;
   const zones = status?.zones ?? [];
   const formatTime = (iso: string | null) => {
@@ -48,7 +49,7 @@ export function MonitoringPanel({ status, error, connected, onStart, onStop }: M
             </span>
           </div>
         </div>
-        <div style={{ display: "flex", gap: "0.5rem" }}>
+        {canManage && <div style={{ display: "flex", gap: "0.5rem" }}>
           {running ? (
             <button className="btn btn-secondary" onClick={onStop} style={{ fontSize: "0.8rem", padding: "0.35rem 0.8rem" }}>
               ■ Stop Monitoring
@@ -58,7 +59,7 @@ export function MonitoringPanel({ status, error, connected, onStart, onStop }: M
               ▶ Start Monitoring
             </button>
           )}
-        </div>
+        </div>}
       </div>
 
       {/* Zone rotation grid */}
