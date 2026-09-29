@@ -2,19 +2,22 @@ import random
 import asyncio
 from typing import Dict, List
 from datetime import datetime
+from backend.core.time import utc_now
 from backend.core.interfaces import OccupancyProvider, EnergyProvider, TemperatureProvider, TariffProvider
-from backend.schemas.events import OccupancyEvent
+from backend.schemas.events import OccupancyEvent, TemperatureReading
 from backend.schemas.energy import EnergyReading, Tariff
 from backend.integrations.bacnet.simulated import SimulatedBACnetBuildingControlProvider
 
 class MockOccupancyProvider(OccupancyProvider):
     def get_occupancy(self, zone_id: str) -> OccupancyEvent:
+        observed = utc_now()
         return OccupancyEvent(
             zone_id=zone_id,
             people_count=18,
             capacity=40,
             occupancy_percentage=45.0,
-            occupancy_state="MEDIUM"
+            occupancy_state="MEDIUM",
+            timestamp=observed, observed_at=observed, source="mock_occupancy_provider", simulated=True,
         )
         
     def detect_from_image(self, image_bytes: bytes, zone_id: str, zone_capacity: int):
@@ -41,13 +44,19 @@ class MockTemperatureProvider(TemperatureProvider):
     def get_temperature(self, zone_id: str) -> float:
         return 27.1
 
+    def get_temperature_reading(self, zone_id: str) -> TemperatureReading:
+        observed = utc_now()
+        return TemperatureReading(zone_id=zone_id, temperature=27.1, timestamp=observed,
+                                 observed_at=observed, source="mock_temperature_provider", simulated=True)
+
 class MockTariffProvider(TariffProvider):
     def get_current_tariff(self) -> Tariff:
         return Tariff(
             tariff_id="default_tariff",
             rate_per_kwh=0.15,
             currency="USD",
-            is_peak=False
+            is_peak=False,
+            observed_at=utc_now(), source="mock_tariff_provider", simulated=True,
         )
 
 class MockEnergyProvider(EnergyProvider):
@@ -61,7 +70,8 @@ class MockEnergyProvider(EnergyProvider):
             energy_kwh=100.5,
             cost=15.07,
             tariff=self.tariff_provider.get_current_tariff(),
-            is_simulated=True
+            is_simulated=True,
+            observed_at=utc_now(), source="mock_energy_provider",
         )
 
 class MockBuildingControlProvider(SimulatedBACnetBuildingControlProvider):

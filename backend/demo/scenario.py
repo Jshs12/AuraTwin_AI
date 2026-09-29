@@ -40,8 +40,11 @@ class DemoScenarioOccupancyProvider(OccupancyProvider):
         capacity = self.capacities[zone_id]
         pct = min(100.0, count / max(capacity, 1) * 100.0)
         level = "EMPTY" if count == 0 else "LOW" if pct < 30 else "MEDIUM" if pct < 70 else "HIGH"
+        observed = utc_now()
         return OccupancyEvent(zone_id=zone_id, people_count=count, capacity=capacity,
-                              occupancy_percentage=round(pct, 1), occupancy_state=level)
+                              occupancy_percentage=round(pct, 1), occupancy_state=level,
+                              timestamp=observed, observed_at=observed,
+                              source="demo_scenario_simulation", simulated=True)
 
 
 class DemoScenarioEngine:

@@ -2,6 +2,7 @@ import math
 import os
 from datetime import datetime
 from uuid import uuid4
+from typing import Callable
 
 from backend.core.events import EventTrace
 from backend.core.interfaces import BuildingControlProvider
@@ -10,14 +11,19 @@ from backend.safety.constraints import SafetyConstraintService
 from backend.schemas.control import ControlResult, HVACCommand
 from backend.schemas.state import ZoneState
 from backend.core.time import utc_now
+from backend.services.data_quality import DataQualityGate
 
 
 class ControlService:
     """Authoritative safety gate and command lifecycle for building control."""
 
-    def __init__(self, provider: BuildingControlProvider, safety: SafetyConstraintService | None = None):
+    def __init__(self, provider: BuildingControlProvider, safety: SafetyConstraintService | None = None,
+                 data_quality: DataQualityGate | None = None,
+                 state_provider: Callable[[str], ZoneState] | None = None):
         self.provider = provider
         self.safety = safety or SafetyConstraintService()
+        self.data_quality = data_quality or DataQualityGate()
+        self.state_provider = state_provider
         self.last_results: dict[str, ControlResult] = {}
         try:
             self.recommendation_ttl_seconds = float(os.getenv("RECOMMENDATION_TTL_SECONDS", "60"))
@@ -26,13 +32,29 @@ class ControlService:
         except ValueError:
             self.recommendation_ttl_seconds = 60.0
 
-    def apply_validated_recommendation(self, validation: SafetyValidationResult, state: ZoneState) -> bool:
+    def apply_validated_recommendation(self, validation: SafetyValidationResult, state: ZoneState,
+                                       *, current_state: ZoneState | None = None) -> bool:
         """Backward-compatible boolean API; details live in the result method."""
-        return self.apply_validated_recommendation_result(validation, state).success
+        return self.apply_validated_recommendation_result(validation, state, current_state=current_state).success
 
     def apply_validated_recommendation_result(
-        self, validation: SafetyValidationResult, state: ZoneState
+        self, validation: SafetyValidationResult, state: ZoneState, *,
+        current_state: ZoneState | None = None,
     ) -> ControlResult:
+        if current_state is not None:
+            state = current_state
+        elif self.state_provider is not None:
+            try:
+                state = self.state_provider(state.zone.zone_id)
+            except Exception:
+                return self._quality_failure(state, "CURRENT_STATE_UNAVAILABLE")
+        quality = self.data_quality.assess_zone_state(state)
+        state.data_quality = quality
+        failures = self.data_quality.critical_failures(quality)
+        if failures:
+            reason_codes = sorted({item.reason_code or item.state.value for item in failures.values()})
+            return self._quality_failure(state, ", ".join(reason_codes), failures)
+
         command_id = str(uuid4())
         requested = validation.validated_setpoint
         if requested is None:
@@ -147,6 +169,20 @@ class ControlService:
                 error_code="PROVIDER_ERROR", error_message="Building control provider failed.",
             )
         return self._remember(result)
+
+    def _quality_failure(self, state: ZoneState, reason: str, failures: dict | None = None) -> ControlResult:
+        command_id = str(uuid4())
+        EventTrace.log_event("CONTROL_VALIDATION", state.zone.zone_id, "data_quality_gate",
+            {"command_id": command_id, "outcome": "REJECTED", "reason": reason,
+             "signals": {name: item.model_dump(mode="json") for name, item in (failures or {}).items()}},
+            status="FAILED")
+        return self._remember(ControlResult(command_id=command_id, zone_id=state.zone.zone_id,
+            requested_setpoint=None, previous_setpoint=(float(state.hvac_status.present_value)
+                if isinstance(state.hvac_status.present_value, (int, float))
+                and math.isfinite(float(state.hvac_status.present_value)) else None),
+            success=False, status="REJECTED", provider=self.provider.provider_identity,
+            simulated=self.provider.is_simulated, error_code="DATA_QUALITY_REJECTED",
+            error_message=f"Control blocked by data quality gate ({reason})."))
 
     def _remember(self, result: ControlResult) -> ControlResult:
         self.last_results[result.zone_id] = result

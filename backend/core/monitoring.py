@@ -286,7 +286,10 @@ class ZoneMonitoringScheduler:
                                   "recommendation_kind": decision.recommendation_kind})
             if (decision.validation.outcome in {"VALIDATED", "FALLBACK"}
                     and decision.validation.validated_setpoint != state.hvac_status.present_value):
-                result = self.control_service.apply_validated_recommendation_result(decision.validation, state)
+                control_state = self.state_service.get_zone_state(
+                    zone_id, occupancy_override=occupancy)
+                result = self.control_service.apply_validated_recommendation_result(
+                    decision.validation, state, current_state=control_state)
                 activity = {
                     "command_id": result.command_id,
                     "occupancy_at_command": occupancy.people_count,

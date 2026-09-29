@@ -22,6 +22,7 @@ from backend.schemas.state import ZoneState
 from backend.schemas.zone import ComfortLimits, Zone
 from backend.services.control import ControlService
 from backend.services.zone_state import ZoneStateService
+from backend.core.time import utc_now
 
 
 def make_context(zone_id="classroom_01"):
@@ -40,12 +41,16 @@ def make_state(zone_id="classroom_01", setpoint=24.0):
     zone = Zone(zone_id=zone_id, name="Test Classroom", type="classroom", capacity=40,
                 area_m2=60, comfort=ComfortLimits(min_temperature=22, max_temperature=26))
     occupancy = OccupancyEvent(zone_id=zone_id, people_count=12, capacity=40,
-                               occupancy_percentage=30, occupancy_state="MEDIUM")
+                               occupancy_percentage=30, occupancy_state="MEDIUM",
+                               observed_at=utc_now(), source="test_simulation", simulated=True)
     tariff_provider = MockTariffProvider()
     energy = MockEnergyProvider(tariff_provider).get_energy(zone_id)
     return ZoneState(zone=zone, occupancy=occupancy, temperature=25.0, energy=energy,
                      tariff=energy.tariff,
-                     hvac_status=BACnetReadResult(zone_id=zone_id, object_id="AV:1", present_value=setpoint))
+                     hvac_status=BACnetReadResult(zone_id=zone_id, object_id="AV:1", present_value=setpoint,
+                         timestamp=utc_now(), observed_at=utc_now(), simulated=True),
+                     occupancy_source="mock_occupancy_provider", temperature_source="mock_temperature_provider",
+                     temperature_observed_at=utc_now(), temperature_simulated=True)
 
 
 def model_payload(**overrides):

@@ -64,6 +64,8 @@ class SimulatedBACnetBuildingControlProvider(BuildingControlProvider):
                 "power_kw": 4.8 if initial_power > 0 else 0.0,
                 "energy_kwh": float(energy_kwh),
                 "last_command_timestamp": None,
+                "observed_at": utc_now(),
+                "setpoint_observed_at": utc_now(),
                 "control_state": "READY",
             }
 
@@ -94,6 +96,7 @@ class SimulatedBACnetBuildingControlProvider(BuildingControlProvider):
                 "fan_status": step.fan_status,
                 "power_kw": step.power_kw,
                 "energy_kwh": step.energy_kwh,
+                "observed_at": step.timestamp,
             })
             EventTrace.log_event("HVAC_RESPONSE", zone_id, self.provider_identity, {
                 "current_temperature": step.current_temperature,
@@ -114,6 +117,8 @@ class SimulatedBACnetBuildingControlProvider(BuildingControlProvider):
                     "hvac_mode": "COOLING" if initial_power > 0 else "IDLE",
                     "fan_status": initial_power > 0, "power_kw": 4.8 if initial_power > 0 else 0.0,
                     "energy_kwh": 0.0, "last_command_timestamp": None,
+                    "observed_at": utc_now(),
+                    "setpoint_observed_at": utc_now(),
                     "control_state": "READY",
                 })
 
@@ -143,6 +148,8 @@ class SimulatedBACnetBuildingControlProvider(BuildingControlProvider):
                 power_kw=s["power_kw"],
                 energy_kwh=s["energy_kwh"],
                 last_command_timestamp=s["last_command_timestamp"],
+                timestamp=s["observed_at"], observed_at=s["observed_at"], simulated=True,
+                setpoint_observed_at=s["setpoint_observed_at"],
             )
 
     def get_points(self, zone_id: str) -> list[ControlPoint]:
@@ -182,6 +189,7 @@ class SimulatedBACnetBuildingControlProvider(BuildingControlProvider):
 
             state["requested_setpoint"] = requested
             state["last_command_timestamp"] = utc_now()
+            state["setpoint_observed_at"] = state["last_command_timestamp"]
             if self.failure_mode == "unavailable":
                 state["control_state"] = "FAILED"
                 EventTrace.log_event("CONTROL_COMMAND_SENT", command.zone_id, self.provider_identity,
@@ -218,6 +226,7 @@ class SimulatedBACnetBuildingControlProvider(BuildingControlProvider):
                 "power_kw": step.power_kw,
                 "energy_kwh": step.energy_kwh,
                 "control_state": "APPLIED",
+                "observed_at": step.timestamp,
             })
             EventTrace.log_event("HVAC_RESPONSE", command.zone_id, self.provider_identity,
                                  {"command_id": command.command_id, "applied_setpoint": requested,

@@ -10,6 +10,11 @@ class OccupancyEvent(BaseModel):
     occupancy_percentage: float = Field(..., description="Percentage of capacity used")
     occupancy_state: str = Field(..., description="State: EMPTY, LOW, MEDIUM, HIGH")
     timestamp: datetime = Field(default_factory=utc_now)
+    source: str = "unknown"
+    simulated: bool = False
+    # Unlike timestamp (legacy event/build time), this is explicitly the time
+    # represented by the occupancy observation.
+    observed_at: Optional[datetime] = None
 
 class TelemetryEvent(BaseModel):
     zone_id: str = Field(..., description="Zone identifier")
@@ -21,3 +26,6 @@ class TemperatureReading(BaseModel):
     zone_id: str = Field(..., description="Zone identifier")
     temperature: float = Field(..., description="Current temperature")
     timestamp: datetime = Field(default_factory=utc_now)
+    observed_at: Optional[datetime] = None
+    source: str = "unknown"
+    simulated: bool = False

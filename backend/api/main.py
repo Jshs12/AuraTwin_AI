@@ -139,7 +139,7 @@ app.state.occupancy_provider_ready = (
 
 # Instantiate services
 zone_state_service = ZoneStateService(occ_prov, temp_prov, energy_prov, control_prov)
-control_service = ControlService(control_prov)
+control_service = ControlService(control_prov, state_provider=zone_state_service.get_zone_state)
 optimizer = OptimizationEngine()
 recommendation_workflow = RecommendationWorkflow(provider=intelligence_provider_from_environment())
 

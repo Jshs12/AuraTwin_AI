@@ -16,6 +16,7 @@ from backend.schemas.state import ZoneState
 from backend.schemas.zone import ComfortLimits, Zone
 from backend.services.control import ControlService
 from backend.services.zone_state import ZoneStateService
+from backend.core.time import utc_now
 
 
 def make_state(setpoint: float = 24.0) -> ZoneState:
@@ -26,10 +27,14 @@ def make_state(setpoint: float = 24.0) -> ZoneState:
         zone=Zone(zone_id="test_zone", name="Test", type="classroom", capacity=30,
                   area_m2=50, comfort=ComfortLimits(min_temperature=22, max_temperature=26)),
         occupancy=OccupancyEvent(zone_id="test_zone", people_count=12, capacity=30,
-                                 occupancy_percentage=40, occupancy_state="MEDIUM"),
+                                 occupancy_percentage=40, occupancy_state="MEDIUM",
+                                 observed_at=utc_now(), source="test_simulation", simulated=True),
         temperature=27.1, energy=energy, tariff=tariff,
         hvac_status=BACnetReadResult(zone_id="test_zone", object_id="SIMULATED_POINT:cooling_setpoint",
-                                     present_value=setpoint, provider="SIMULATED BACNET"),
+                                     present_value=setpoint, provider="SIMULATED BACNET",
+                                     timestamp=utc_now(), observed_at=utc_now(), simulated=True),
+        occupancy_source="test_simulation", temperature_source="test_simulation",
+        temperature_observed_at=utc_now(), temperature_simulated=True,
     )
 
 

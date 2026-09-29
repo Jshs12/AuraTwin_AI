@@ -29,6 +29,11 @@ class BuildingControlState(BaseModel):
     power_kw: Optional[float] = None
     energy_kwh: Optional[float] = None
     last_command_timestamp: Optional[datetime] = None
+    # timestamp remains the snapshot/API timestamp; observed_at is when the
+    # provider says the represented state last changed or was measured.
+    observed_at: Optional[datetime] = None
+    setpoint_observed_at: Optional[datetime] = None
+    simulated: bool = False
 
 
 # Backward-compatible schema name retained for existing API consumers.

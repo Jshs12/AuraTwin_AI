@@ -3,20 +3,23 @@ from typing import Any, Optional
 from backend.core.events import EventTrace
 from backend.intelligence.providers import IntelligenceProvider, MockIntelligenceProvider
 from backend.intelligence.schemas import (
-    IntelligenceContext, IntelligenceRecommendation, RecommendationDecision,
+    IntelligenceContext, IntelligenceRecommendation, RecommendationDecision, SafetyValidationResult,
 )
 from backend.optimization.engine import OptimizationEngine
 from backend.safety.constraints import SafetyConstraintService
+from backend.services.data_quality import DataQualityGate
 from backend.schemas.state import ZoneState
 
 
 class RecommendationWorkflow:
     def __init__(self, provider: Optional[IntelligenceProvider] = None,
                  optimizer: Optional[OptimizationEngine] = None,
-                 safety: Optional[SafetyConstraintService] = None):
+                 safety: Optional[SafetyConstraintService] = None,
+                 data_quality: Optional[DataQualityGate] = None):
         self.provider = provider or MockIntelligenceProvider()
         self.optimizer = optimizer or OptimizationEngine()
         self.safety = safety or SafetyConstraintService()
+        self.data_quality = data_quality or DataQualityGate()
 
     def build_context(self, state: ZoneState) -> IntelligenceContext:
         return IntelligenceContext(
@@ -48,6 +51,11 @@ class RecommendationWorkflow:
         )
 
     def recommend(self, state: ZoneState) -> RecommendationDecision:
+        quality = self.data_quality.assess_zone_state(state)
+        state.data_quality = quality
+        failures = self.data_quality.critical_failures(quality)
+        if failures:
+            return self._quality_rejected(state, failures)
         context = self.build_context(state)
         EventTrace.log_event("INTELLIGENCE_REQUESTED", state.zone.zone_id, "recommendation_workflow", context.model_dump(mode="json"))
         try:
@@ -79,6 +87,11 @@ class RecommendationWorkflow:
 
     def validate_submitted(self, state: ZoneState, recommendation: Any) -> RecommendationDecision:
         """Revalidate client-submitted advisory data; never trust client validation fields."""
+        quality = self.data_quality.assess_zone_state(state)
+        state.data_quality = quality
+        failures = self.data_quality.critical_failures(quality)
+        if failures:
+            return self._quality_rejected(state, failures)
         validation = self.safety.validate(recommendation, state)
         if validation.outcome == "VALIDATED":
             self._log_validation(state.zone.zone_id, validation)
@@ -90,6 +103,13 @@ class RecommendationWorkflow:
         return self._fallback(state, None, validation.rejection_reason or "Submitted recommendation rejected.")
 
     def _fallback(self, state: ZoneState, candidate: Optional[IntelligenceRecommendation], reason: str) -> RecommendationDecision:
+        # Fallback uses the same state inputs and must independently pass the
+        # critical input quality policy before the optimizer is invoked.
+        quality = self.data_quality.assess_zone_state(state)
+        state.data_quality = quality
+        failures = self.data_quality.critical_failures(quality)
+        if failures:
+            return self._quality_rejected(state, failures, candidate=candidate)
         deterministic = self.optimizer.generate_recommendation(state)
         # Adapt deterministic optimizer output into the same advisory contract.
         fallback_candidate = IntelligenceRecommendation(
@@ -111,6 +131,23 @@ class RecommendationWorkflow:
             validation=validation,
             recommendation_kind="deterministic_fallback" if validation.outcome == "FALLBACK" else "rejected",
         )
+
+    @staticmethod
+    def _quality_rejected(state: ZoneState, failures: dict,
+                          candidate: Optional[IntelligenceRecommendation] = None) -> RecommendationDecision:
+        safe_codes = sorted({assessment.reason_code or assessment.state.value
+                             for assessment in failures.values()})
+        reason = "Critical input quality check failed: " + ", ".join(safe_codes)
+        EventTrace.log_event("DATA_QUALITY_REJECTED", state.zone.zone_id, "data_quality_gate",
+                             {name: assessment.model_dump(mode="json")
+                              for name, assessment in failures.items()}, status="FAILED")
+        validation = SafetyValidationResult(outcome="REJECTED", original_recommendation=None,
+            rejection_reason=reason, source="data_quality_gate")
+        EventTrace.log_event("RECOMMENDATION_REJECTED", state.zone.zone_id, "data_quality_gate",
+                             {"reason": reason}, status="FAILED")
+        return RecommendationDecision(zone_id=state.zone.zone_id,
+            intelligence_recommendation=candidate, validation=validation,
+            recommendation_kind="rejected")
 
     @staticmethod
     def _log_validation(zone_id: str, validation: Any) -> None:

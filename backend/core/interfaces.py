@@ -19,6 +19,10 @@ class TemperatureProvider(ABC):
     def get_temperature(self, zone_id: str) -> float:
         pass
 
+    def get_temperature_reading(self, zone_id: str):
+        """Optional timestamped reading hook; legacy providers need not implement it."""
+        return None
+
 class TariffProvider(ABC):
     @abstractmethod
     def get_current_tariff(self) -> Tariff:

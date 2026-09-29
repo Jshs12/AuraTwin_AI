@@ -117,6 +117,8 @@ class YOLOOccupancyProvider(OccupancyProvider):
             occupancy_percentage=0.0,
             occupancy_state="UNKNOWN",
             timestamp=utc_now(),
+            source="yolo_occupancy_provider",
+            simulated=False,
         )
 
     def detect_from_image(
@@ -206,6 +208,9 @@ class YOLOOccupancyProvider(OccupancyProvider):
             occupancy_percentage=round(percentage, 2),
             occupancy_state=state,
             timestamp=utc_now(),
+            source="yolo_occupancy_provider",
+            simulated=False,
+            observed_at=utc_now(),
         )
 
         # Cache for subsequent get_occupancy() calls
