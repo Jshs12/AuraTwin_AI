@@ -49,7 +49,7 @@ The event store is bounded to 500 events. Events use unique IDs and UTC timestam
 
 Malformed recommendation diagnostics no longer include Pydantic's raw input echo. Rejected recommendations are not copied into shared event payloads. Lyzr remains optional; no secret is sent to the browser or written to events by the provider implementation. Live Lyzr service acceptance is **UNVERIFIED**.
 
-The safety checks do not constitute commissioned controls engineering, site-specific interlocks, cybersecurity review, or proof of safety for real equipment. The current zone state includes mock/simulated provenance and has no configurable sensor freshness policy for every input.
+The safety checks do not constitute commissioned controls engineering, site-specific interlocks, cybersecurity review, or proof of safety for real equipment. Per-signal freshness limits for occupancy, temperature, and setpoint are configurable as documented in `docs/stale_data_protection.md`; no sensor age limits are guessed or enabled by default. Current demo readings carry mock/simulated provenance and do not prove real sensor freshness.
 
 ## BACnet and real building control
 

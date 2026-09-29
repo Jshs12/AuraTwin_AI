@@ -1,8 +1,10 @@
+import asyncio
 from datetime import timedelta
 
 import pytest
 
 from backend.core.events import EventTrace
+from backend.core.monitoring import ZoneMonitoringScheduler
 from backend.core.mock_providers import (
     MockBuildingControlProvider, MockEnergyProvider, MockOccupancyProvider,
     MockTariffProvider, MockTemperatureProvider,
@@ -24,7 +26,7 @@ from backend.safety.constraints import SafetyConstraintService
 
 
 def make_state(*, count=12, temperature=24.0, setpoint=24.0, occupancy_time=None,
-               temp_time=None, energy_power=1.2):
+               temp_time=None, hvac_time=None, energy_power=1.2):
     now = utc_now()
     tariff_provider = MockTariffProvider()
     tariff = tariff_provider.get_current_tariff()
@@ -40,7 +42,7 @@ def make_state(*, count=12, temperature=24.0, setpoint=24.0, occupancy_time=None
         occupancy=occupancy, temperature=temperature, energy=energy, tariff=tariff,
         hvac_status=BACnetReadResult(zone_id="classroom_01", object_id="SIMULATED_POINT:setpoint",
             present_value=setpoint, provider="SIMULATED BACNET", timestamp=now,
-            observed_at=now, simulated=True),
+            observed_at=hvac_time or now, setpoint_observed_at=hvac_time or now, simulated=True),
         occupancy_source="test_simulation", temperature_source="test_simulation",
         temperature_observed_at=temp_time or now, temperature_simulated=True,
     )
@@ -65,6 +67,49 @@ def test_quality_states_valid_stale_missing_invalid_and_out_of_range():
                        simulated=True, now=now, numeric=True).state == QualityState.INVALID
     assert gate.assess("temperature", 17.9, source="test", observation_timestamp=now,
                        simulated=True, now=now, numeric=True).state == QualityState.OUT_OF_RANGE
+
+
+def test_fresh_critical_inputs_are_valid_with_explicit_policy():
+    now = utc_now()
+    state = make_state(occupancy_time=now, temp_time=now, hvac_time=now)
+    gate = DataQualityGate(max_age_seconds={
+        "occupancy": 30, "temperature": 30, "setpoint": 30,
+    })
+    report = gate.assess_zone_state(state, now=now)
+    assert {name: report.signals[name].state for name in
+            ("occupancy", "temperature", "hvac_setpoint")} == {
+                "occupancy": QualityState.VALID,
+                "temperature": QualityState.VALID,
+                "hvac_setpoint": QualityState.VALID,
+            }
+
+
+@pytest.mark.parametrize("signal,policy_signal,state_kwargs", [
+    ("occupancy", "occupancy", {"occupancy_time": "stale"}),
+    ("temperature", "temperature", {"temp_time": "stale"}),
+    ("hvac_setpoint", "setpoint", {"hvac_time": "stale"}),
+])
+def test_each_stale_critical_input_is_classified_stale(signal, policy_signal, state_kwargs):
+    old = utc_now() - timedelta(seconds=100)
+    kwargs = {name: old if value == "stale" else value for name, value in state_kwargs.items()}
+    report = DataQualityGate(max_age_seconds={policy_signal: 10}).assess_zone_state(make_state(**kwargs))
+    assert report.signals[signal].state == QualityState.STALE
+
+
+def test_future_critical_observation_is_invalid_and_missing_time_is_missing():
+    future_state = make_state(temp_time=utc_now() + timedelta(seconds=2))
+    missing_state = make_state()
+    missing_state.temperature_observed_at = None
+    missing_state.occupancy = missing_state.occupancy.model_copy(update={"observed_at": None})
+    missing_state.hvac_status = missing_state.hvac_status.model_copy(update={"setpoint_observed_at": None,
+                                                                              "observed_at": None})
+    gate = DataQualityGate(max_age_seconds={"occupancy": 10, "temperature": 10, "setpoint": 10})
+    future_report = gate.assess_zone_state(future_state)
+    missing_report = gate.assess_zone_state(missing_state)
+    assert future_report.signals["temperature"].state == QualityState.INVALID
+    assert missing_report.signals["occupancy"].state == QualityState.MISSING
+    assert missing_report.signals["temperature"].state == QualityState.MISSING
+    assert missing_report.signals["hvac_setpoint"].state == QualityState.MISSING
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
@@ -146,7 +191,12 @@ def test_zone_state_temperature_override_uses_simulated_control_provenance():
     assert assessment.state == QualityState.VALID
 
 
-def test_recommendation_is_blocked_before_intelligence_for_bad_critical_quality():
+@pytest.mark.parametrize("policy_signal,state_kwargs", [
+    ("occupancy", {"occupancy_time": "stale"}),
+    ("temperature", {"temp_time": "stale"}),
+    ("setpoint", {"hvac_time": "stale"}),
+])
+def test_recommendation_is_blocked_before_intelligence_for_stale_critical_quality(policy_signal, state_kwargs):
     class CalledProvider:
         provider_name = "called"
         def __init__(self): self.called = False
@@ -154,9 +204,11 @@ def test_recommendation_is_blocked_before_intelligence_for_bad_critical_quality(
             self.called = True
             return advisory(make_state())
     provider = CalledProvider()
-    state = make_state(temp_time=utc_now() - timedelta(seconds=100))
+    old = utc_now() - timedelta(seconds=100)
+    kwargs = {name: old if value == "stale" else value for name, value in state_kwargs.items()}
+    state = make_state(**kwargs)
     workflow = RecommendationWorkflow(provider=provider,
-        data_quality=DataQualityGate(max_age_seconds={"temperature": 10}))
+        data_quality=DataQualityGate(max_age_seconds={policy_signal: 10}))
     decision = workflow.recommend(state)
     assert decision.recommendation_kind == "rejected"
     assert decision.validation.outcome == "REJECTED"
@@ -175,6 +227,32 @@ def test_fallback_is_quality_checked_independently():
     assert decision.validation.outcome == "REJECTED"
     assert decision.recommendation_kind == "rejected"
     assert state.data_quality.signals["temperature"].state == QualityState.STALE
+
+
+def test_fallback_does_not_proceed_when_occupancy_becomes_stale():
+    state = make_state()
+
+    class BecomesStale:
+        def generate_recommendation(self, context):
+            state.occupancy = state.occupancy.model_copy(update={
+                "observed_at": utc_now() - timedelta(seconds=100)})
+            raise RuntimeError("offline")
+
+    decision = RecommendationWorkflow(provider=BecomesStale(), data_quality=DataQualityGate(
+        max_age_seconds={"occupancy": 10})).recommend(state)
+    assert decision.validation.outcome == "REJECTED"
+    assert decision.recommendation_kind == "rejected"
+    assert decision.deterministic_recommendation is None
+
+
+class CountingControlProvider(MockBuildingControlProvider):
+    def __init__(self):
+        super().__init__()
+        self.write_count = 0
+
+    def write_command(self, command):
+        self.write_count += 1
+        return super().write_command(command)
 
 
 def test_control_rebuilds_current_state_and_rejects_bad_quality_without_write():
@@ -201,6 +279,42 @@ def test_control_rejects_invalid_fresh_state_without_provider_write():
     result = control.apply_validated_recommendation_result(validation, state)
     assert result.error_code == "DATA_QUALITY_REJECTED"
     assert provider.read_status("classroom_01").present_value == before
+
+
+def test_fresh_recommendation_is_rejected_when_final_current_state_is_stale():
+    state = make_state()
+    stale = make_state(temp_time=utc_now() - timedelta(seconds=100))
+    current_states = iter((state, stale))
+    provider = CountingControlProvider()
+    validation = SafetyConstraintService().validate(advisory(state), state)
+    control = ControlService(provider, data_quality=DataQualityGate(
+        max_age_seconds={"temperature": 10}), state_provider=lambda _zone: next(current_states))
+
+    result = control.apply_validated_recommendation_result(validation, state)
+
+    assert result.success is False
+    assert result.error_code == "DATA_QUALITY_REJECTED"
+    assert result.status == "REJECTED"
+    assert provider.write_count == 0
+
+
+def test_demo_monitoring_path_rejects_stale_occupancy_without_control_write():
+    control_provider = CountingControlProvider()
+    gate = DataQualityGate(max_age_seconds={"occupancy": 10})
+    state_service = ZoneStateService(MockOccupancyProvider(), MockTemperatureProvider(),
+        MockEnergyProvider(MockTariffProvider()), control_provider, data_quality_gate=gate)
+    workflow = RecommendationWorkflow(provider=MockIntelligenceProvider(), data_quality=gate)
+    control = ControlService(control_provider, data_quality=gate,
+        state_provider=state_service.get_zone_state)
+    scheduler = ZoneMonitoringScheduler(state_service, workflow, control, MockOccupancyProvider())
+    stale_occupancy = make_state(occupancy_time=utc_now() - timedelta(seconds=100)).occupancy
+
+    result = asyncio.run(scheduler.process_simulated_occupancy(
+        "classroom_01", stale_occupancy, "phase10_2_stale_test"))
+
+    assert result["decision"].validation.outcome == "REJECTED"
+    assert result["decision"].recommendation_kind == "rejected"
+    assert control_provider.write_count == 0
 
 
 def test_existing_safety_limits_remain_authoritative_after_quality_passes():

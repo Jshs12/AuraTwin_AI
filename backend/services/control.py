@@ -33,13 +33,16 @@ class ControlService:
             self.recommendation_ttl_seconds = 60.0
 
     def apply_validated_recommendation(self, validation: SafetyValidationResult, state: ZoneState,
-                                       *, current_state: ZoneState | None = None) -> bool:
+                                       *, current_state: ZoneState | None = None,
+                                       final_state_provider: Callable[[str], ZoneState] | None = None) -> bool:
         """Backward-compatible boolean API; details live in the result method."""
-        return self.apply_validated_recommendation_result(validation, state, current_state=current_state).success
+        return self.apply_validated_recommendation_result(validation, state, current_state=current_state,
+            final_state_provider=final_state_provider).success
 
     def apply_validated_recommendation_result(
         self, validation: SafetyValidationResult, state: ZoneState, *,
         current_state: ZoneState | None = None,
+        final_state_provider: Callable[[str], ZoneState] | None = None,
     ) -> ControlResult:
         if current_state is not None:
             state = current_state
@@ -143,6 +146,56 @@ class ControlService:
                 simulated=self.provider.is_simulated, recommendation_reference=reference,
                 error_code="PROVIDER_UNAVAILABLE", error_message=reason,
             ))
+
+        # Re-read and re-assess critical inputs at the last control boundary.
+        # The earlier check protects workflow and normal control flow; this
+        # second check prevents a sensor crossing its configured age limit
+        # during validation/readiness work from reaching the provider write.
+        freshness_provider = final_state_provider or self.state_provider
+        if freshness_provider is not None:
+            try:
+                final_state = freshness_provider(state.zone.zone_id)
+            except Exception:
+                return self._quality_failure(state, "CURRENT_STATE_UNAVAILABLE")
+        else:
+            # Legacy callers without a state provider remain supported. Their
+            # supplied observation is reassessed against the current clock.
+            final_state = state
+        final_validation = self.safety.validate(validation.original_recommendation, final_state)
+        if final_validation.outcome != "VALIDATED" or final_validation.validated_setpoint is None:
+            reason = final_validation.rejection_reason or "Recommendation no longer passes safety validation against current state."
+            EventTrace.log_event("CONTROL_VALIDATION", final_state.zone.zone_id, "control_service",
+                                 {"command_id": command_id, "outcome": "REJECTED", "reason": reason}, status="FAILED")
+            return self._remember(ControlResult(
+                command_id=command_id, zone_id=final_state.zone.zone_id,
+                requested_setpoint=float(requested), previous_setpoint=float(final_state.hvac_status.present_value),
+                success=False, status="REJECTED", provider=self.provider.provider_identity,
+                simulated=self.provider.is_simulated, recommendation_reference=reference,
+                error_code="FRESH_STATE_REJECTED", error_message=reason,
+            ))
+        if float(requested) != final_validation.validated_setpoint:
+            reason = "Validated setpoint changed before the control write."
+            EventTrace.log_event("CONTROL_VALIDATION", final_state.zone.zone_id, "control_service",
+                                 {"command_id": command_id, "outcome": "REJECTED", "reason": reason}, status="FAILED")
+            return self._remember(ControlResult(
+                command_id=command_id, zone_id=final_state.zone.zone_id,
+                requested_setpoint=float(requested), previous_setpoint=float(final_state.hvac_status.present_value),
+                success=False, status="REJECTED", provider=self.provider.provider_identity,
+                simulated=self.provider.is_simulated, recommendation_reference=reference,
+                error_code="SETPOINT_CHANGED", error_message=reason,
+            ))
+
+        # Reassess against the current clock after recommendation validation,
+        # immediately before command events and the provider write.
+        final_quality = self.data_quality.assess_zone_state(final_state)
+        final_state.data_quality = final_quality
+        final_failures = self.data_quality.critical_failures(final_quality)
+        if final_failures:
+            reason_codes = sorted({item.reason_code or item.state.value for item in final_failures.values()})
+            return self._quality_failure(final_state, ", ".join(reason_codes), final_failures)
+
+        state = final_state
+        verified = final_validation
 
         EventTrace.log_event("CONTROL_VALIDATION", state.zone.zone_id, "control_service",
                              {"command_id": command_id, "outcome": "VALIDATED",
