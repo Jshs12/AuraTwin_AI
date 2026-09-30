@@ -68,7 +68,7 @@ def test_nan_and_infinite_setpoints_are_rejected(setpoint):
 def test_hard_bounds_are_enforced():
     result = SafetyConstraintService().validate(advisory(make_state(), 31), make_state())
     assert result.outcome == "REJECTED"
-    assert "hard bounds" in result.rejection_reason
+    assert "configured bounds" in result.rejection_reason
 
 
 def test_zone_comfort_limits_are_enforced():

@@ -183,9 +183,16 @@ class SimulatedBACnetBuildingControlProvider(BuildingControlProvider):
                 state["control_state"] = "REJECTED"
                 return self._failure(command, "REJECTED", "INVALID_SETPOINT", "Setpoint must be finite and numeric.", previous)
             requested = float(requested)
-            if not 16.0 <= requested <= 30.0:
+            # Lazy import avoids a package initialization cycle: safety types
+            # depend on shared intelligence schemas, while this provider is
+            # itself loaded during API startup.
+            from backend.safety.constraints import SafetyConstraintService
+            rejection = SafetyConstraintService().validate_command_values(
+                command.model_dump(), command.zone_id, previous,
+            )
+            if rejection:
                 state["control_state"] = "REJECTED"
-                return self._failure(command, "REJECTED", "INVALID_SETPOINT", "Setpoint is outside provider limits [16, 30] °C.", previous)
+                return self._failure(command, "REJECTED", "COMMAND_LIMIT_REJECTED", rejection, previous)
 
             state["requested_setpoint"] = requested
             state["last_command_timestamp"] = utc_now()

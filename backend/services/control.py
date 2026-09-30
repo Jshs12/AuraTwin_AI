@@ -197,6 +197,28 @@ class ControlService:
         state = final_state
         verified = final_validation
 
+        command = HVACCommand(
+            zone_id=state.zone.zone_id, setpoint=verified.validated_setpoint,
+            source=verified.source, command_id=command_id,
+            recommendation_reference=reference,
+        )
+        command_validation = self.safety.validate_command(command, state)
+        if command_validation.outcome != "VALIDATED":
+            reason = command_validation.rejection_reason or "Command limit validation rejected the command."
+            EventTrace.log_event("CONTROL_VALIDATION", state.zone.zone_id, "command_limit_gate",
+                                 {"command_id": command_id, "outcome": "REJECTED",
+                                  "reason": reason}, status="FAILED")
+            return self._remember(ControlResult(
+                command_id=command_id, zone_id=state.zone.zone_id,
+                requested_setpoint=float(requested),
+                previous_setpoint=float(state.hvac_status.present_value),
+                success=False, status="REJECTED", provider=self.provider.provider_identity,
+                simulated=self.provider.is_simulated, recommendation_reference=reference,
+                error_code="COMMAND_LIMIT_REJECTED", error_message=reason,
+            ))
+        EventTrace.log_event("CONTROL_VALIDATION", state.zone.zone_id, "command_limit_gate",
+                             {"command_id": command_id, "outcome": "VALIDATED",
+                              "validated_setpoint": command_validation.validated_setpoint})
         EventTrace.log_event("CONTROL_VALIDATION", state.zone.zone_id, "control_service",
                              {"command_id": command_id, "outcome": "VALIDATED",
                               "validated_setpoint": verified.validated_setpoint})
@@ -205,11 +227,6 @@ class ControlService:
         EventTrace.log_event("CONTROL_COMMAND", state.zone.zone_id, "control_service",
                              {"command_id": command_id, "setpoint": verified.validated_setpoint,
                               "provider": self.provider.provider_identity})
-        command = HVACCommand(
-            zone_id=state.zone.zone_id, setpoint=verified.validated_setpoint,
-            source=verified.source, command_id=command_id,
-            recommendation_reference=reference,
-        )
         try:
             result = self.provider.write_command(command)
         except Exception:

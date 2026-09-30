@@ -48,6 +48,31 @@ data. Legacy providers without explicit observation timestamps remain
 itself. It does not replace signal freshness limits and does not make sensor
 data fresh. Existing `SafetyConstraintService` checks remain authoritative.
 
+## Phase 10.3 command limits
+
+The existing `SafetyConstraintService` also owns the command limit policy.
+Configure all three values from an approved policy before enabling control:
+
+| Configuration | Meaning |
+| --- | --- |
+| `COMMAND_LIMIT_MIN_SETPOINT` | Inclusive absolute minimum setpoint in °C |
+| `COMMAND_LIMIT_MAX_SETPOINT` | Inclusive absolute maximum setpoint in °C |
+| `COMMAND_LIMIT_MAX_DELTA` | Maximum absolute change from the latest HVAC setpoint, in °C |
+
+There are no production defaults. Missing, non-finite, or internally
+inconsistent values reject recommendations and commands. The limits apply to
+provider recommendations and deterministic fallback recommendations. At the
+last control boundary, `ControlService` validates the exact command against
+the latest `ZoneState`, including zone, supported action, absolute limits,
+per-command delta, current setpoint, and zone comfort range. The simulated
+BACnet provider repeats the command-value checks as a defense at its own write
+method. A rejected command does not reach a provider write from `ControlService`.
+
+The pytest environment sets explicit test-only values (16, 30, and 2 °C) to
+exercise configured behavior; these are not application defaults or
+recommended building limits. Configure production values only through the
+deployment environment and an approved control policy.
+
 ## Limits
 
 This protects the software decision path using supplied timestamps and

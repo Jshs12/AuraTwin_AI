@@ -8,6 +8,7 @@ class HVACCommand(BaseModel):
     zone_id: str = Field(..., description="Zone identifier")
     setpoint: float = Field(..., description="Target setpoint")
     source: str = Field(..., description="Source of command, e.g. optimization_engine, manual")
+    action_type: str = Field(default="setpoint_adjustment", description="Requested HVAC action")
     timestamp: datetime = Field(default_factory=utc_now)
     command_id: str = Field(default_factory=lambda: str(uuid4()))
     recommendation_reference: Optional[str] = None

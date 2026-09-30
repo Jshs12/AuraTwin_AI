@@ -243,3 +243,33 @@ def test_failed_simulated_control_is_not_reported_as_success():
     assert any(event.event_type == "DEMO_CONTROL_ACTIVITY" and event.status == "FAILED"
                for event in EventTrace.get_history(zone))
   asyncio.run(run())
+
+
+def test_demo_monitoring_respects_final_command_limit_rejection(monkeypatch):
+  async def run():
+    control, state_service, service, scheduler = _pipeline()
+    zone = "classroom_01"
+    source = DemoScenarioOccupancyProvider({zone: state_service._zones[zone].capacity})
+    source.set_counts((zone,), (35,))
+    writes = []
+    original_write = control.write_command
+
+    def count_write(command):
+      writes.append(command)
+      return original_write(command)
+
+    control.write_command = count_write
+    service.safety.validate_command = lambda command, state: SafetyValidationResult(
+        outcome="REJECTED", rejection_reason="Command test limit rejection.",
+        source="command_limit_gate",
+    )
+    await scheduler.process_simulated_occupancy(
+        zone, source.get_occupancy(zone), "scenario-command-limit-test",
+    )
+    result = service.last_results[zone]
+    assert result.status == "REJECTED"
+    assert result.error_code == "COMMAND_LIMIT_REJECTED"
+    assert writes == []
+
+  from backend.intelligence.schemas import SafetyValidationResult
+  asyncio.run(run())
