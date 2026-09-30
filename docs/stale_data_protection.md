@@ -73,6 +73,35 @@ exercise configured behavior; these are not application defaults or
 recommended building limits. Configure production values only through the
 deployment environment and an approved control policy.
 
+## Phase 10.4 fail-safe and manual override
+
+Manual override and autonomous control enablement are separate per-zone
+software states. Manual override blocks AuraTwin writes; it does not issue a
+manual setpoint command or represent a physical wall controller. Operator
+changes are serialized with the final simulated provider boundary, exposed in
+the zone state response, and recorded in both the event trace and audit log.
+The API process starts with autonomous control disabled for each zone; an
+OPERATOR must explicitly enable it after the fresh-state checks succeed.
+
+The control provider is simulated. A failed readiness check or failed command
+result disables autonomous control for that zone and latches a fail-safe state.
+Provider readiness recovery emits a recovery event but does not enable control.
+An authorized OPERATOR must explicitly re-enable it; the enable operation
+requires valid fresh critical data, a configured command policy, and provider
+readiness. Re-enabling itself does not send a command. The next command passes
+the ordinary recommendation TTL, data-quality, safety, and command-limit
+checks again. A successful first write after a block emits
+`AUTO_CONTROL_RESUMED`.
+
+These mode and failure latches are in-memory demo state. They serialize control
+changes and simulated writes within the running process, but they are not a
+durable interlock and manual-override/failure history does not survive process
+restart. Startup control is disabled, so a prior failure latch cannot turn into
+an enabled autonomous mode after restart. No claim is made about a physical
+controller's fallback behavior, hardware interlocks, or production
+availability. Real BACnet and hardware fail-safe guarantees are outside this
+phase.
+
 ## Limits
 
 This protects the software decision path using supplied timestamps and

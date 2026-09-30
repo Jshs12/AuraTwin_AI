@@ -1,9 +1,13 @@
+import { useState } from "react";
 import { useZoneState } from "../../hooks/useZoneState";
 import { Card, OccupancyBadge, Button } from "../common";
 import { Timeline } from "../events/Timeline";
 import { CVPanel } from "../occupancy/CVPanel";
+import { api } from "../../services/api";
 
 export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: string | null; demoPhase?: string | null; canOperate?: boolean }) {
+  const [modeBusy, setModeBusy] = useState(false);
+  const [modeError, setModeError] = useState<string | null>(null);
   const {
     state,
     history,
@@ -11,6 +15,7 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
     controlResult,
     loading,
     error,
+    refresh,
     generateRecommendation,
     applyRecommendation,
   } = useZoneState(zoneId);
@@ -40,6 +45,20 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
   }
 
   const { zone, occupancy, temperature, energy, tariff, hvac_status } = state;
+  const controlMode = state.control_mode;
+
+  const updateMode = async (action: () => Promise<unknown>) => {
+    setModeBusy(true);
+    setModeError(null);
+    try {
+      await action();
+      await refresh();
+    } catch (err: any) {
+      setModeError(err.message || "Unable to update control state");
+    } finally {
+      setModeBusy(false);
+    }
+  };
 
   return (
     <div className="detail-panel">
@@ -123,6 +142,38 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
               </div>
             </div>
           </div>
+          <div className="zone-stats" style={{ marginTop: "0.75rem" }}>
+            <div>
+              <div className="stat-label">Autonomous control</div>
+              <div className="stat-value">{controlMode?.control_enabled ? "ENABLED" : "DISABLED"}</div>
+            </div>
+            <div>
+              <div className="stat-label">Manual override</div>
+              <div className="stat-value">{controlMode?.manual_override ? "ACTIVE" : "INACTIVE"}</div>
+            </div>
+            {controlMode?.fail_safe_active && <div><span className="badge danger">FAIL SAFE LATCHED</span></div>}
+          </div>
+          {controlMode?.provider_failure_latched && (
+            <div className="badge warning" style={{ marginTop: "0.5rem" }}>
+              Provider reports {controlMode.provider_recovered ? "recovered" : "failure"}; operator re-enable and fresh validation are required.
+            </div>
+          )}
+          {canOperate && controlMode && (
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginTop: "0.75rem" }}>
+              <Button disabled={modeBusy} variant={controlMode.manual_override ? "primary" : "neutral"}
+                onClick={() => updateMode(() => api.setManualOverride(zoneId, !controlMode.manual_override))}>
+                {controlMode.manual_override ? "Deactivate Manual Override" : "Enable Manual Override"}
+              </Button>
+              <Button disabled={modeBusy} variant={controlMode.control_enabled ? "neutral" : "primary"}
+                onClick={() => updateMode(() => api.setZoneControlEnabled(zoneId, !controlMode.control_enabled))}>
+                {controlMode.control_enabled ? "Disable Autonomous Control" : "Re-enable Autonomous Control"}
+              </Button>
+            </div>
+          )}
+          <div style={{ fontSize: "0.7rem", color: "var(--text-muted)", marginTop: "0.35rem" }}>
+            Manual override pauses AuraTwin commands; it does not send a manual HVAC setpoint.
+          </div>
+          {modeError && <div className="demo-error" role="alert" style={{ marginTop: "0.5rem" }}>{modeError}</div>}
           {controlResult && (
             <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.5rem" }}>
               Last command: {controlResult.status} · {controlResult.provider}

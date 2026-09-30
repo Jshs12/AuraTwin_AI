@@ -36,6 +36,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.schemas.state import ZoneState
 from backend.schemas.optimization import OptimizationRecommendation
+from backend.schemas.control import ControlModeUpdate
 from backend.intelligence.schemas import RecommendationSubmission, IntelligenceRecommendation
 from backend.intelligence.service import RecommendationWorkflow
 from backend.intelligence.factory import intelligence_provider_from_environment
@@ -47,6 +48,7 @@ from backend.integrations.bacnet.simulated import SimulatedBACnetBuildingControl
 from backend.services.zone_state import ZoneStateService
 from backend.optimization.engine import OptimizationEngine
 from backend.services.control import ControlService
+from backend.services.control_state import ZoneControlStateService
 from backend.core.events import EventTrace, EventBroadcaster
 from backend.core.monitoring import ZoneMonitoringScheduler
 from backend.core.mock_providers import MockEnergyStreamProvider
@@ -182,7 +184,8 @@ app.state.occupancy_provider_ready = (
 
 # Instantiate services
 zone_state_service = ZoneStateService(occ_prov, temp_prov, energy_prov, control_prov)
-control_service = ControlService(control_prov, state_provider=zone_state_service.get_zone_state)
+control_service = ControlService(control_prov, state_provider=zone_state_service.get_zone_state,
+                                 control_states=ZoneControlStateService(initially_enabled=False))
 optimizer = OptimizationEngine()
 recommendation_workflow = RecommendationWorkflow(provider=intelligence_provider_from_environment())
 
@@ -479,11 +482,95 @@ async def get_zone_state(zone_id: str, _user=Depends(require_zone_permission(Per
     try:
         demo_state = app.state.monitoring_scheduler.demo_current_states.get(zone_id)
         if demo_state is not None:
-            return demo_state
-        state = zone_state_service.get_zone_state(zone_id)
-        return state
+            state = demo_state
+        else:
+            state = zone_state_service.get_zone_state(zone_id)
+        response = state.model_dump(mode="json")
+        response["control_mode"] = control_service.control_states.snapshot(zone_id).model_dump(mode="json")
+        return response
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/api/zones/{zone_id}/control-state")
+async def get_zone_control_state(zone_id: str, _user=Depends(require_zone_permission(Permission.ZONES_READ))):
+    try:
+        zone_state_service.get_zone_state(zone_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return control_service.control_states.snapshot(zone_id)
+
+
+@app.post("/api/zones/{zone_id}/manual-override")
+async def set_manual_override(zone_id: str, body: ControlModeUpdate, request: Request,
+                              user=Depends(require_zone_permission(Permission.CONTROL_EXECUTE))):
+    if zone_id not in zone_state_service._zones:
+        raise HTTPException(status_code=404, detail="Zone not found")
+    state = control_service.control_states.set_manual_override(
+        zone_id, body.enabled, user_id=user.user_id,
+    )
+    request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
+        action="manual_override_enabled" if body.enabled else "manual_override_disabled",
+        resource="zone_control_state", resource_id=zone_id,
+        building_id=DEVELOPMENT_BUILDING_ID, success=True,
+        metadata={"enabled": body.enabled},
+    )
+    return state
+
+
+@app.post("/api/zones/{zone_id}/control-enabled")
+async def set_zone_control_enabled(zone_id: str, body: ControlModeUpdate, request: Request,
+                                   user=Depends(require_zone_permission(Permission.CONTROL_EXECUTE))):
+    if zone_id not in zone_state_service._zones:
+        raise HTTPException(status_code=404, detail="Zone not found")
+    if not body.enabled:
+        state = control_service.control_states.set_control_enabled(
+            zone_id, False, user_id=user.user_id,
+        )
+        request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
+            action="control_disabled", resource="zone_control_state", resource_id=zone_id,
+            building_id=DEVELOPMENT_BUILDING_ID, success=True, metadata={"enabled": False},
+        )
+        return state
+
+    try:
+        current = zone_state_service.get_zone_state(zone_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    quality = control_service.data_quality.assess_zone_state(current)
+    current.data_quality = quality
+    failures = control_service.data_quality.critical_failures(quality)
+    if failures:
+        request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
+            action="control_enable_rejected", resource="zone_control_state", resource_id=zone_id,
+            building_id=DEVELOPMENT_BUILDING_ID, success=False,
+            metadata={"reason_code": "DATA_QUALITY_REJECTED"},
+        )
+        raise HTTPException(status_code=409, detail="Fresh critical zone data is required before enabling control.")
+    if not control_service.safety.command_policy_ready:
+        request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
+            action="control_enable_rejected", resource="zone_control_state", resource_id=zone_id,
+            building_id=DEVELOPMENT_BUILDING_ID, success=False,
+            metadata={"reason_code": "COMMAND_POLICY_UNAVAILABLE"},
+        )
+        raise HTTPException(status_code=409, detail="Configured command limits are required before enabling control.")
+    if not control_service._provider_ready():
+        control_service.control_states.note_provider_failure(zone_id,
+            command_id="operator-enable", reason_code="PROVIDER_UNAVAILABLE", provider_ready=False)
+        request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
+            action="control_enable_rejected", resource="zone_control_state", resource_id=zone_id,
+            building_id=DEVELOPMENT_BUILDING_ID, success=False,
+            metadata={"reason_code": "PROVIDER_UNAVAILABLE"},
+        )
+        raise HTTPException(status_code=409, detail="Control provider must be ready before enabling control.")
+    control_service.control_states.note_provider_ready(zone_id)
+    state = control_service.control_states.set_control_enabled(zone_id, True, user_id=user.user_id)
+    request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
+        action="control_enabled", resource="zone_control_state", resource_id=zone_id,
+        building_id=DEVELOPMENT_BUILDING_ID, success=True,
+        metadata={"enabled": True, "fresh_state_checked": True},
+    )
+    return state
 
 
 @app.post("/api/zones/{zone_id}/recommendation")

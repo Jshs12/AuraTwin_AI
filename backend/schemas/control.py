@@ -13,6 +13,25 @@ class HVACCommand(BaseModel):
     command_id: str = Field(default_factory=lambda: str(uuid4()))
     recommendation_reference: Optional[str] = None
 
+
+class ZoneControlState(BaseModel):
+    """Software control-mode state for one zone; distinct from hardware state."""
+
+    zone_id: str
+    control_enabled: bool = True
+    manual_override: bool = False
+    fail_safe_active: bool = False
+    provider_failure_latched: bool = False
+    provider_unavailable_seen: bool = False
+    provider_recovered: bool = False
+    resume_pending: bool = False
+    updated_at: datetime = Field(default_factory=utc_now)
+    updated_by: Optional[str] = None
+
+
+class ControlModeUpdate(BaseModel):
+    enabled: bool
+
 class BuildingControlState(BaseModel):
     """Provider-neutral control and telemetry snapshot."""
 

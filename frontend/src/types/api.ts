@@ -93,6 +93,20 @@ export interface ZoneState {
   tariff: Tariff;
   hvac_status: BuildingControlState;
   occupancy_source?: string;
+  control_mode?: ZoneControlMode;
+}
+
+export interface ZoneControlMode {
+  zone_id: string;
+  control_enabled: boolean;
+  manual_override: boolean;
+  fail_safe_active: boolean;
+  provider_failure_latched: boolean;
+  provider_unavailable_seen: boolean;
+  provider_recovered: boolean;
+  resume_pending: boolean;
+  updated_at: string;
+  updated_by: string | null;
 }
 
 export interface OptimizationRecommendation {

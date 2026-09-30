@@ -111,8 +111,8 @@ def test_control_service_validates_before_provider_and_returns_structured_result
     assert types.index("CONTROL_COMMAND_REQUESTED") < types.index("CONTROL_VALIDATION")
     assert types.index("CONTROL_VALIDATION") < types.index("CONTROL_COMMAND_SENT")
     assert types[types.index("CONTROL_COMMAND_REQUESTED"):] == [
-        "CONTROL_COMMAND_REQUESTED", "CONTROL_VALIDATION", "CONTROL_VALIDATION",
-        "CONTROL_COMMAND", "CONTROL_COMMAND_SENT", "CONTROL_ACKNOWLEDGED",
+        "CONTROL_COMMAND_REQUESTED", "CONTROL_VALIDATION", "CONTROL_COMMAND",
+        "CONTROL_COMMAND_SENT", "CONTROL_ACKNOWLEDGED",
         "HVAC_RESPONSE", "ENERGY_UPDATE",
     ]
 

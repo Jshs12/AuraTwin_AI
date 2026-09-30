@@ -87,6 +87,26 @@ export const api = {
     return res.json();
   },
 
+  async setManualOverride(zoneId: string, enabled: boolean) {
+    const res = await authFetch(`${API_BASE}/zones/${zoneId}/manual-override`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "Unable to change manual override");
+    return data;
+  },
+
+  async setZoneControlEnabled(zoneId: string, enabled: boolean) {
+    const res = await authFetch(`${API_BASE}/zones/${zoneId}/control-enabled`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "Unable to change control state");
+    return data;
+  },
+
   async getZoneHistory(zoneId: string): Promise<SystemEvent[]> {
     const res = await authFetch(`${API_BASE}/zones/${zoneId}/history`);
     if (!res.ok) throw new Error(`Failed to fetch history for zone ${zoneId}`);

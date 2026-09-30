@@ -47,6 +47,10 @@ class SafetyConstraintService:
             return "Command limit policy is invalid."
         return None
 
+    @property
+    def command_policy_ready(self) -> bool:
+        return self._command_policy_error() is None
+
     def validate(self, recommendation: Any, state: ZoneState) -> SafetyValidationResult:
         raw = recommendation.model_dump() if isinstance(recommendation, IntelligenceRecommendation) else recommendation
         if not isinstance(raw, dict):
