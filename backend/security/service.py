@@ -2,14 +2,14 @@ import os
 import uuid
 from .models import User
 from .roles import Role
-from .repository import InMemoryUserRepository, DEVELOPMENT_BUILDING_ID
+from .repository import InMemoryUserRepository, UserRepository, DEVELOPMENT_BUILDING_ID
 from .passwords import hash_password, verify_password
 from .jwt import create_access_token
 from .jwt import token_settings
 
 
 class AuthService:
-    def __init__(self, users: InMemoryUserRepository | None = None):
+    def __init__(self, users: UserRepository | None = None):
         self.users = users or InMemoryUserRepository()
         email, password = os.getenv("AURATWIN_BOOTSTRAP_ADMIN_EMAIL"), os.getenv("AURATWIN_BOOTSTRAP_ADMIN_PASSWORD")
         operator_email = os.getenv("AURATWIN_BOOTSTRAP_OPERATOR_EMAIL")
