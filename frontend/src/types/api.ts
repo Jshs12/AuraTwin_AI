@@ -15,6 +15,46 @@ export interface Zone {
   current_occupancy: number;
   current_temperature: number | null;
   current_setpoint: number | null;
+  floor_id?: string;
+  building_id?: string;
+  database_zone_id?: string;
+}
+
+export interface Floor {
+  floor_id: string;
+  building_id: string;
+  name: string;
+  floor_key: string;
+  level_number: number | null;
+}
+
+export type TelemetrySignal = "occupancy" | "temperature" | "power" | "energy" | "cost" | "tariff_rate";
+export interface HistoricalTelemetryPoint {
+  organization_id: string;
+  building_id: string;
+  floor_id: string;
+  zone_id: string;
+  signal: TelemetrySignal;
+  value: number;
+  unit: string;
+  observed_at: string;
+  ingested_at: string | null;
+  source: string | null;
+  quality_state: string | null;
+  simulated: boolean | null;
+}
+export interface TelemetryAggregation {
+  signal: TelemetrySignal;
+  count: number;
+  minimum: number | null;
+  maximum: number | null;
+  average: number | null;
+}
+export interface TelemetryAnalyticsResponse {
+  observations: HistoricalTelemetryPoint[];
+  aggregations: TelemetryAggregation[];
+  query: Record<string, string | null>;
+  truncated: boolean;
 }
 
 export interface OccupancyEvent {

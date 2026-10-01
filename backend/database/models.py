@@ -167,6 +167,7 @@ class TelemetryObservationRecord(Base):
         UniqueConstraint("idempotency_key", name="uq_telemetry_idempotency_key"),
         Index("ix_telemetry_org_building_zone_time", "organization_id", "building_id", "zone_id", "observed_at"),
         Index("ix_telemetry_building_time", "building_id", "observed_at"),
+        Index("ix_telemetry_building_floor_time", "building_id", "floor_id", "observed_at"),
         Index("ix_telemetry_zone_signal_time", "zone_id", "signal", "observed_at"),
         CheckConstraint("signal IN ('occupancy', 'temperature', 'power', 'energy', 'cost', 'tariff_rate')", name="ck_telemetry_signal"),
     )

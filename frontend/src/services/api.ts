@@ -9,6 +9,9 @@ import type {
   ControlResult,
   DemoStatus,
   DemoBuildingSummary,
+  Floor,
+  TelemetryAnalyticsResponse,
+  TelemetrySignal,
 } from "../types/api";
 
 // Keep browser clients attached to the machine serving the UI (localhost,
@@ -85,6 +88,27 @@ export const api = {
     if (!res.ok) throw new Error("Failed to fetch zones");
     const data = await res.json();
     return data.zones;
+  },
+
+  async getFloors(buildingId: string): Promise<Floor[]> {
+    const res = await authFetch(`${API_BASE}/buildings/${encodeURIComponent(buildingId)}/floors`);
+    if (!res.ok) throw new Error("Failed to fetch floors for authorized building");
+    return (await res.json()).floors as Floor[];
+  },
+
+  async getHistoricalTelemetry(params: {
+    buildingId: string; floorId?: string; zoneId?: string; signal?: TelemetrySignal;
+    startTime: string; endTime: string; limit?: number;
+  }): Promise<TelemetryAnalyticsResponse> {
+    const query = new URLSearchParams({ start_time: params.startTime, end_time: params.endTime });
+    if (params.floorId) query.set("floor_id", params.floorId);
+    if (params.zoneId) query.set("zone_id", params.zoneId);
+    if (params.signal) query.set("signal", params.signal);
+    if (params.limit) query.set("limit", String(params.limit));
+    const res = await authFetch(`${API_BASE}/telemetry/buildings/${encodeURIComponent(params.buildingId)}?${query}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "Unable to load historical telemetry");
+    return data as TelemetryAnalyticsResponse;
   },
 
   async getZoneState(zoneId: string): Promise<ZoneState> {

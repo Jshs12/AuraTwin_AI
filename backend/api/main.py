@@ -71,13 +71,15 @@ from backend.database.runtime import initialize_local_demo_database
 from backend.database.repositories import SQLAlchemyUserRepository, SQLAlchemyOrganizationRepository
 from backend.database.configuration import SQLAlchemyConfigurationRepository
 from backend.telemetry.repository import SQLAlchemyTelemetryRepository
-from backend.telemetry.service import TelemetryPersistenceService
+from backend.telemetry.service import TelemetryPersistenceService, telemetry_query_max_limit
+from backend.schemas.telemetry import TelemetryAnalyticsResponse, TelemetrySignal
 from datetime import datetime
 from backend.api.configuration import router as configuration_router
 
-# Configuration/auth records are persistent. Live ZoneState, telemetry and events
-# remain runtime-only. SQLite is the local development default; Postgres requires
-# an explicit migration before this application can use it.
+# Configuration/auth and scalar telemetry observations are persistent. Live
+# ZoneState snapshots, event traces, and demo stream history remain runtime-only.
+# SQLite is the local development default; Postgres requires an explicit
+# migration before this application can use it.
 database_engine, database_sessions = initialize_local_demo_database(DatabaseSettings.from_environment())
 configuration_repository = SQLAlchemyConfigurationRepository(database_sessions)
 organization_repository = SQLAlchemyOrganizationRepository(database_sessions)
@@ -572,59 +574,157 @@ async def get_zone(zone_id: str, _user=Depends(require_zone_permission(Permissio
     raise HTTPException(status_code=404, detail="Zone not found")
 
 
-def _telemetry_range(start_at: datetime | None, end_at: datetime | None):
-    for value in (start_at, end_at):
+def _telemetry_range(start_time: datetime | None, end_time: datetime | None,
+                     start_at: datetime | None = None, end_at: datetime | None = None):
+    if (start_time is not None and start_at is not None) or (end_time is not None and end_at is not None):
+        raise HTTPException(status_code=422, detail="Use only one spelling for each time bound.")
+    start, end = start_time or start_at, end_time or end_at
+    if start is None or end is None:
+        raise HTTPException(status_code=422, detail="Both start_time and end_time are required for historical queries.")
+    for value in (start, end):
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise HTTPException(status_code=422, detail="Telemetry time filters must include a timezone.")
-    if start_at is not None and end_at is not None and start_at > end_at:
-        raise HTTPException(status_code=422, detail="start_at must not be after end_at.")
+    if start is not None and end is not None and start >= end:
+        raise HTTPException(status_code=422, detail="start_time must be before end_time.")
+    if end is not None and end > datetime.now(end.tzinfo):
+        raise HTTPException(status_code=422, detail="end_time must not be in the future.")
+    return start, end
 
 
-def _telemetry_payload(rows):
-    return {"observations": [row.model_dump(mode="json") for row in rows]}
-
-
-@app.get("/api/buildings/{building_id}/telemetry")
+@app.get("/api/buildings/{building_id}/telemetry", response_model=TelemetryAnalyticsResponse)
+@app.get("/api/telemetry/buildings/{building_id}", response_model=TelemetryAnalyticsResponse)
 async def get_building_telemetry(building_id: str, request: Request,
+        start_time: datetime | None = None, end_time: datetime | None = None,
         start_at: datetime | None = None, end_at: datetime | None = None,
-        limit: int = 500, user=Depends(require_permission(Permission.ZONES_READ))):
-    _telemetry_range(start_at, end_at)
-    if not 1 <= limit <= 1000:
-        raise HTTPException(status_code=422, detail="limit must be between 1 and 1000.")
+        floor_id: str | None = None, zone_id: str | None = None,
+        signal: str | None = None, limit: int = 500, aggregate: bool = True,
+        user=Depends(require_permission(Permission.ZONES_READ))):
+    start, end = _telemetry_range(start_time, end_time, start_at, end_at)
+    if not 1 <= limit <= telemetry_query_max_limit():
+        raise HTTPException(status_code=422, detail=f"limit must be between 1 and {telemetry_query_max_limit()}.")
+    if signal is not None and signal not in {item.value for item in TelemetrySignal}:
+        raise HTTPException(status_code=422, detail="Unsupported telemetry signal.")
     building = configuration_repository.get_building(building_id)
     if building is None:
         raise HTTPException(status_code=404, detail="Building not found")
     from backend.security.dependencies import require_building_access
     require_building_access(building["building_id"], user, request)
-    return _telemetry_payload(telemetry_service.list_building(
+    if floor_id is not None:
+        floor = configuration_repository.get_floor(floor_id)
+        if floor is None or floor["building_id"] != building["building_id"]:
+            raise HTTPException(status_code=404, detail="Floor not found in requested building")
+    if zone_id is not None:
+        zone = configuration_repository.resolve_zone(zone_id)
+        if zone is None or zone.building_id != building["building_id"] or (floor_id and zone.floor_id != floor_id):
+            raise HTTPException(status_code=404, detail="Zone not found in requested scope")
+        zone_id = zone.database_zone_id
+    candidates = telemetry_service.list_building(
         organization_id=building["organization_id"], building_id=building["building_id"],
-        start_at=start_at, end_at=end_at, limit=limit))
+        start_at=start, end_at=end, limit=limit + 1, floor_id=floor_id,
+        zone_id=zone_id, signal=signal)
+    rows = candidates[:limit]
+    aggs = telemetry_service.aggregate(organization_id=building["organization_id"],
+        building_id=building["building_id"], start_at=start, end_at=end,
+        floor_id=floor_id, zone_id=zone_id, signal=signal) if aggregate else []
+    return TelemetryAnalyticsResponse(observations=rows, aggregations=aggs,
+        query={"building_id": building["building_id"], "floor_id": floor_id,
+               "zone_id": zone_id, "signal": signal,
+               "start_time": start.isoformat() if start else None,
+               "end_time": end.isoformat() if end else None}, truncated=len(candidates) > limit)
 
 
-@app.get("/api/zones/{zone_id}/telemetry")
-async def get_zone_telemetry(zone_id: str, start_at: datetime | None = None,
-        end_at: datetime | None = None, limit: int = 500,
+@app.get("/api/zones/{zone_id}/telemetry", response_model=TelemetryAnalyticsResponse)
+async def get_zone_telemetry(zone_id: str, start_time: datetime | None = None,
+        end_time: datetime | None = None, start_at: datetime | None = None,
+        end_at: datetime | None = None, signal: str | None = None,
+        limit: int = 500, aggregate: bool = True,
         _user=Depends(require_zone_permission(Permission.ZONES_READ))):
-    _telemetry_range(start_at, end_at)
-    if not 1 <= limit <= 1000:
-        raise HTTPException(status_code=422, detail="limit must be between 1 and 1000.")
+    start, end = _telemetry_range(start_time, end_time, start_at, end_at)
+    if not 1 <= limit <= telemetry_query_max_limit():
+        raise HTTPException(status_code=422, detail=f"limit must be between 1 and {telemetry_query_max_limit()}.")
+    if signal is not None and signal not in {item.value for item in TelemetrySignal}:
+        raise HTTPException(status_code=422, detail="Unsupported telemetry signal.")
     scope = configuration_repository.telemetry_scope(zone_id)
     if scope is None:
         raise HTTPException(status_code=404, detail="Zone not found")
-    return _telemetry_payload(telemetry_service.list_zone(
+    candidates = telemetry_service.list_zone(
         organization_id=scope["organization_id"], building_id=scope["building_id"],
-        zone_id=scope["database_zone_id"], start_at=start_at, end_at=end_at, limit=limit))
+        zone_id=scope["database_zone_id"], start_at=start, end_at=end,
+        limit=limit + 1, signal=signal)
+    rows = candidates[:limit]
+    aggs = telemetry_service.aggregate(organization_id=scope["organization_id"],
+        building_id=scope["building_id"], start_at=start, end_at=end,
+        zone_id=scope["database_zone_id"], signal=signal) if aggregate else []
+    return TelemetryAnalyticsResponse(observations=rows, aggregations=aggs,
+        query={"zone_id": scope["database_zone_id"], "signal": signal,
+               "start_time": start.isoformat() if start else None,
+               "end_time": end.isoformat() if end else None}, truncated=len(candidates) > limit)
 
 
-@app.get("/api/zones/{zone_id}/telemetry/latest")
-async def get_latest_zone_telemetry(zone_id: str,
+@app.get("/api/zones/{zone_id}/telemetry/latest", response_model=TelemetryAnalyticsResponse)
+async def get_latest_zone_telemetry(zone_id: str, signal: str | None = None,
         _user=Depends(require_zone_permission(Permission.ZONES_READ))):
+    if signal is not None and signal not in {item.value for item in TelemetrySignal}:
+        raise HTTPException(status_code=422, detail="Unsupported telemetry signal.")
     scope = configuration_repository.telemetry_scope(zone_id)
     if scope is None:
         raise HTTPException(status_code=404, detail="Zone not found")
-    return _telemetry_payload(telemetry_service.list_zone(
+    return TelemetryAnalyticsResponse(observations=telemetry_service.list_zone(
         organization_id=scope["organization_id"], building_id=scope["building_id"],
-        zone_id=scope["database_zone_id"], limit=1))
+        zone_id=scope["database_zone_id"], signal=signal, limit=1), aggregations=[],
+        query={"zone_id": scope["database_zone_id"], "signal": signal,
+               "start_time": None, "end_time": None}, truncated=False)
+
+
+@app.get("/api/telemetry/latest", response_model=TelemetryAnalyticsResponse)
+async def get_latest_telemetry(zone_id: str, signal: str | None = None,
+        _user=Depends(require_zone_permission(Permission.ZONES_READ))):
+    if signal is not None and signal not in {item.value for item in TelemetrySignal}:
+        raise HTTPException(status_code=422, detail="Unsupported telemetry signal.")
+    scope = configuration_repository.telemetry_scope(zone_id)
+    if scope is None:
+        raise HTTPException(status_code=404, detail="Zone not found")
+    return TelemetryAnalyticsResponse(observations=telemetry_service.list_zone(
+        organization_id=scope["organization_id"], building_id=scope["building_id"],
+        zone_id=scope["database_zone_id"], signal=signal, limit=1), aggregations=[],
+        query={"zone_id": scope["database_zone_id"], "signal": signal,
+               "start_time": None, "end_time": None}, truncated=False)
+
+
+@app.get("/api/floors/{floor_id}/telemetry", response_model=TelemetryAnalyticsResponse)
+async def get_floor_telemetry(floor_id: str, request: Request,
+        start_time: datetime | None = None, end_time: datetime | None = None,
+        signal: str | None = None, zone_id: str | None = None,
+        limit: int = 500, aggregate: bool = True,
+        user=Depends(require_permission(Permission.ZONES_READ))):
+    start, end = _telemetry_range(start_time, end_time)
+    if not 1 <= limit <= telemetry_query_max_limit():
+        raise HTTPException(status_code=422, detail=f"limit must be between 1 and {telemetry_query_max_limit()}.")
+    if signal is not None and signal not in {item.value for item in TelemetrySignal}:
+        raise HTTPException(status_code=422, detail="Unsupported telemetry signal.")
+    floor = configuration_repository.get_floor(floor_id)
+    if floor is None:
+        raise HTTPException(status_code=404, detail="Floor not found")
+    from backend.security.dependencies import require_building_access
+    require_building_access(floor["building_id"], user, request)
+    building = configuration_repository.get_building(floor["building_id"])
+    if zone_id:
+        zone = configuration_repository.resolve_zone(zone_id)
+        if zone is None or zone.floor_id != floor_id:
+            raise HTTPException(status_code=404, detail="Zone not found in requested floor")
+        zone_id = zone.database_zone_id
+    candidates = telemetry_service.list_floor(organization_id=building["organization_id"],
+        building_id=building["building_id"], floor_id=floor_id, start_at=start,
+        end_at=end, limit=limit + 1, zone_id=zone_id, signal=signal)
+    rows = candidates[:limit]
+    aggs = telemetry_service.aggregate(organization_id=building["organization_id"],
+        building_id=building["building_id"], floor_id=floor_id, zone_id=zone_id,
+        start_at=start, end_at=end, signal=signal) if aggregate else []
+    return TelemetryAnalyticsResponse(observations=rows, aggregations=aggs,
+        query={"building_id": building["building_id"], "floor_id": floor_id,
+               "zone_id": zone_id, "signal": signal,
+               "start_time": start.isoformat() if start else None,
+               "end_time": end.isoformat() if end else None}, truncated=len(candidates) > limit)
 
 
 @app.get("/api/zones/{zone_id}/state")

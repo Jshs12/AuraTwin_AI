@@ -8,6 +8,7 @@ import { CVPanel } from "../components/occupancy/CVPanel";
 import { Summary } from "../components/dashboard/Summary";
 import { MonitoringPanel } from "../components/monitoring/MonitoringPanel";
 import { EnergyChart } from "../components/energy/EnergyChart";
+import { HistoricalTelemetry } from "../components/energy/HistoricalTelemetry";
 import { EventStream } from "../components/events/EventStream";
 import { DemoModePanel } from "../components/demo/DemoModePanel";
 import type { DemoBuildingSummary } from "../types/api";
@@ -149,10 +150,13 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
 
         {/* ── ENERGY ───────────────────────────────────────────── */}
         {activeSection === "Energy" && (
-          <EnergyChart
-            history={energyHistory}
-            demoMode={Boolean(demoSummary?.scenario_id)}
-          />
+          <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+            <div>
+              <div className="card-title">LIVE / RUNTIME ENERGY STREAM</div>
+              <EnergyChart history={energyHistory} demoMode={Boolean(demoSummary?.scenario_id)} />
+            </div>
+            <HistoricalTelemetry buildingId={selectedBuildingId} zones={zones} />
+          </div>
         )}
 
         {/* ── EVENTS ───────────────────────────────────────────── */}

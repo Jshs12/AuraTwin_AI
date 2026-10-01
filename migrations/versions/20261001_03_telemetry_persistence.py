@@ -45,12 +45,14 @@ def upgrade() -> None:
     )
     op.create_index("ix_telemetry_org_building_zone_time", "telemetry_observations", ["organization_id", "building_id", "zone_id", "observed_at"])
     op.create_index("ix_telemetry_building_time", "telemetry_observations", ["building_id", "observed_at"])
+    op.create_index("ix_telemetry_building_floor_time", "telemetry_observations", ["building_id", "floor_id", "observed_at"])
     op.create_index("ix_telemetry_zone_signal_time", "telemetry_observations", ["zone_id", "signal", "observed_at"])
 
 
 def downgrade() -> None:
     op.drop_index("ix_telemetry_zone_signal_time", table_name="telemetry_observations")
     op.drop_index("ix_telemetry_building_time", table_name="telemetry_observations")
+    op.drop_index("ix_telemetry_building_floor_time", table_name="telemetry_observations")
     op.drop_index("ix_telemetry_org_building_zone_time", table_name="telemetry_observations")
     op.drop_table("telemetry_observations")
     with op.batch_alter_table("zones") as batch:

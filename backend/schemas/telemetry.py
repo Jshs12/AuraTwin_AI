@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TelemetrySignal(StrEnum):
@@ -31,3 +31,22 @@ class TelemetryObservation(BaseModel):
     quality_state: str | None = None
     simulated: bool | None = None
     ingested_at: datetime | None = None
+
+
+class TelemetryHistoryResponse(BaseModel):
+    observations: list[TelemetryObservation] = Field(default_factory=list)
+
+
+class TelemetryAggregation(BaseModel):
+    signal: TelemetrySignal
+    count: int
+    minimum: float | None = None
+    maximum: float | None = None
+    average: float | None = None
+
+
+class TelemetryAnalyticsResponse(BaseModel):
+    observations: list[TelemetryObservation] = Field(default_factory=list)
+    aggregations: list[TelemetryAggregation] = Field(default_factory=list)
+    query: dict[str, str | None]
+    truncated: bool = False
