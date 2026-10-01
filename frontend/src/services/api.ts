@@ -320,7 +320,7 @@ export const api = {
   async getZones(buildingId?: string): Promise<Zone[]> {
     const query = buildingId ? `?building_id=${encodeURIComponent(buildingId)}` : "";
     const res = await authFetch(`${API_BASE}/zones${query}`);
-    if (!res.ok) throw new Error("Failed to fetch zones");
+    if (!res.ok) await throwApiError(res, "Unable to load zones for this building.");
     const data = await res.json();
     return data.zones;
   },
@@ -348,7 +348,7 @@ export const api = {
 
   async getZoneState(zoneId: string): Promise<ZoneState> {
     const res = await authFetch(`${API_BASE}/zones/${zoneId}/state`);
-    if (!res.ok) throw new Error(`Failed to fetch state for zone ${zoneId}`);
+    if (!res.ok) await throwApiError(res, "Unable to load this zone’s current state.");
     return res.json();
   },
 
@@ -383,7 +383,7 @@ export const api = {
     const res = await authFetch(`${API_BASE}/zones/${zoneId}/recommendation`, {
       method: "POST"
     });
-    if (!res.ok) throw new Error(`Failed to generate recommendation for zone ${zoneId}`);
+    if (!res.ok) await throwApiError(res, "Recommendation could not be generated.");
     return res.json();
   },
 
@@ -395,7 +395,7 @@ export const api = {
       },
       body: JSON.stringify(decision)
     });
-    if (!res.ok) throw new Error(`Failed to apply control for zone ${zoneId}`);
+    if (!res.ok) await throwApiError(res, "The control command was rejected.");
     const data = await res.json();
     return data.control_result as ControlResult;
   },

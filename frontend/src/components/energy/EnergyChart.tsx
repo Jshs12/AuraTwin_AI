@@ -1,4 +1,5 @@
 import type { EnergyDataPoint } from "../../hooks/useMonitoring";
+import { useState } from "react";
 
 interface EnergyChartProps {
   history: EnergyDataPoint[];
@@ -6,11 +7,12 @@ interface EnergyChartProps {
 }
 
 export function EnergyChart({ history, demoMode = false }: EnergyChartProps) {
+  const [windowSize, setWindowSize] = useState<30 | 60 | 120>(120);
   const WIDTH = 100;
   const HEIGHT = 60;
-  const points = history.slice(-120);
+  const points = history.slice(-windowSize);
   const values = points.map(p => p.power_kw);
-  const currentPower = values.at(-1) ?? 0;
+  const currentPower = values.at(-1);
   const avgPower = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
   const peakPower = values.length ? Math.max(...values) : 0;
   const minPower = Math.min(0, ...values);
@@ -38,30 +40,33 @@ export function EnergyChart({ history, demoMode = false }: EnergyChartProps) {
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "0.75rem", textAlign: "center" }}>
           <div>
             <div style={{ fontSize: "0.65rem", color: "var(--text-muted)", letterSpacing: "0.05em" }}>CURRENT</div>
-            <div style={{ fontSize: "1.1rem", fontWeight: 700, color: "var(--accent)" }}>{currentPower.toFixed(1)}</div>
+            <div style={{ fontSize: "1.1rem", fontWeight: 700, color: "var(--accent)" }}>{currentPower?.toFixed(1) ?? "—"}</div>
             <div style={{ fontSize: "0.65rem", color: "var(--text-muted)" }}>kW</div>
           </div>
           <div>
             <div style={{ fontSize: "0.65rem", color: "var(--text-muted)", letterSpacing: "0.05em" }}>AVERAGE</div>
-            <div style={{ fontSize: "1.1rem", fontWeight: 700, color: "var(--text-primary)" }}>{avgPower.toFixed(1)}</div>
+            <div style={{ fontSize: "1.1rem", fontWeight: 700, color: "var(--text-primary)" }}>{values.length ? avgPower.toFixed(1) : "—"}</div>
             <div style={{ fontSize: "0.65rem", color: "var(--text-muted)" }}>kW</div>
           </div>
           <div>
             <div style={{ fontSize: "0.65rem", color: "var(--text-muted)", letterSpacing: "0.05em" }}>PEAK</div>
-            <div style={{ fontSize: "1.1rem", fontWeight: 700, color: "var(--warning-text, #f0a050)" }}>{peakPower.toFixed(1)}</div>
+            <div style={{ fontSize: "1.1rem", fontWeight: 700, color: "var(--warning-text, #f0a050)" }}>{values.length ? peakPower.toFixed(1) : "—"}</div>
             <div style={{ fontSize: "0.65rem", color: "var(--text-muted)" }}>kW</div>
           </div>
         </div>
       </div>
 
-      {/* SVG Chart */}
+      <div className="chart-controls" role="group" aria-label="Energy chart time window">
+        <span>Recent samples</span>{([30, 60, 120] as const).map(size => <button key={size} type="button" aria-pressed={windowSize === size} onClick={() => setWindowSize(size)}>{size}</button>)}
+      </div>
+      {/* SVG chart; point titles expose timestamp, power, energy and occupancy on hover. */}
       <div style={{ background: "var(--surface-elevated)", borderRadius: 8, padding: "0.5rem", overflow: "hidden" }}>
         {points.length < 2 ? (
           <div style={{ height: 80, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: "0.8rem" }}>
             Waiting for energy data...
           </div>
         ) : (
-          <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} preserveAspectRatio="none" style={{ width: "100%", height: 80 }}>
+          <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} preserveAspectRatio="none" role="img" aria-label={`Power trend across ${points.length} recent samples`} style={{ width: "100%", height: 110 }}>
             {/* Grid lines */}
             {[0, 0.25, 0.5, 0.75, 1].map(t => (
               <line key={t} x1={0} y1={HEIGHT * t} x2={WIDTH} y2={HEIGHT * t}
@@ -105,7 +110,7 @@ export function EnergyChart({ history, demoMode = false }: EnergyChartProps) {
       </div>}
 
       <div style={{ marginTop: "0.5rem", fontSize: "0.65rem", color: "var(--text-muted)", textAlign: "right" }}>
-        Rolling window: latest {points.length} {demoMode ? "building telemetry samples" : "illustrative zone samples"} · all metrics use this window
+        Showing {points.length} of up to {windowSize} recent {demoMode ? "building simulation samples" : "illustrative samples"} · all summary metrics use this window
       </div>
     </div>
   );

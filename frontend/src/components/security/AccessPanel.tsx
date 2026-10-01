@@ -20,6 +20,7 @@ export function AccessPanel({ role }: { role: "ADMIN" | "OPERATOR" }) {
     } catch (err) { setError(err instanceof Error ? err.message : "Unable to create operator"); }
   }
   async function revoke(userId: string) {
+    if (!window.confirm("Revoke this operator’s assigned building access? This action is audited.")) return;
     setError(""); setNotice("");
     try { await api.revokeOperator(userId); setNotice("Operator access revoked."); reload(); }
     catch (err) { setError(err instanceof Error ? err.message : "Unable to revoke access"); }

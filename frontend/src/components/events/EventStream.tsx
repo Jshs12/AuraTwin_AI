@@ -1,5 +1,6 @@
 import type { SystemEvent } from "../../types/api";
 import { formatISTTimestamp } from "../../utils/time";
+import { useMemo, useState } from "react";
 
 interface EventStreamProps {
   events: SystemEvent[];
@@ -43,6 +44,16 @@ const eventColors: Record<string, string> = {
   RUNTIME_OBSERVATION_REJECTED: "#ff6b6b",
 };
 
+const eventGroups = ["All", "Occupancy", "Intelligence", "HVAC", "Energy", "Safety", "System"] as const;
+function eventGroup(type: string): typeof eventGroups[number] {
+  if (/OCCUPANCY|YOLO|SNAPSHOT|SCENE/.test(type)) return "Occupancy";
+  if (/RECOMMENDATION|OPTIMIZATION|FALLBACK|INTELLIGENCE/.test(type)) return "Intelligence";
+  if (/SAFETY|FAIL_SAFE|OVERRIDE|BLOCKED|PROVIDER_FAILURE/.test(type)) return "Safety";
+  if (/ENERGY|TARIFF/.test(type)) return "Energy";
+  if (/CONTROL|HVAC/.test(type)) return "HVAC";
+  return "System";
+}
+
 function getPayloadSummary(event: SystemEvent): string {
   const p = event.payload as Record<string, unknown>;
   if (event.event_type === "SNAPSHOT_CAPTURED" && typeof p.size === "number")
@@ -77,6 +88,8 @@ function getPayloadSummary(event: SystemEvent): string {
 }
 
 export function EventStream({ events, connectionStatus = "disconnected" }: EventStreamProps) {
+  const [selectedGroup, setSelectedGroup] = useState<typeof eventGroups[number]>("All");
+  const visibleEvents = useMemo(() => selectedGroup === "All" ? events : events.filter(event => eventGroup(event.event_type) === selectedGroup), [events, selectedGroup]);
   const live = connectionStatus === "connected";
   if (events.length === 0) {
     return (
@@ -96,8 +109,11 @@ export function EventStream({ events, connectionStatus = "disconnected" }: Event
         <div className="card-title" style={{ marginBottom: 0 }}>LIVE EVENT STREAM</div>
         <span className={`badge ${live ? "success" : "warning"}`} style={{ fontSize: "0.7rem" }}>● {live ? "LIVE" : connectionStatus.replace(/-/g, " ").toUpperCase()} · {events.length} events</span>
       </div>
+      <div className="event-filters" role="group" aria-label="Filter event groups">
+        {eventGroups.map(group => <button type="button" key={group} aria-pressed={selectedGroup === group} onClick={() => setSelectedGroup(group)}>{group}</button>)}
+      </div>
       <div style={{ maxHeight: 420, overflowY: "auto", display: "flex", flexDirection: "column", gap: "0.3rem" }}>
-        {events.map(event => {
+        {visibleEvents.length === 0 ? <div className="product-empty-state">No {selectedGroup === "All" ? "events" : `${selectedGroup.toLowerCase()} events`} in this view.</div> : visibleEvents.map(event => {
           const color = eventColors[event.event_type] ?? "var(--text-secondary)";
           const time = formatISTTimestamp(event.timestamp);
           return (

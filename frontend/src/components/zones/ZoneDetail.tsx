@@ -55,6 +55,12 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
 
   const { zone, occupancy, temperature, energy, tariff, hvac_status } = state;
   const controlMode = state.control_mode;
+  const controlBlockedReason = !canOperate ? "Operational access is required to issue a control command."
+    : controlMode?.manual_override ? "Manual override is active; AuraTwin commands are paused."
+    : !controlMode?.control_enabled ? "Autonomous control is disabled for this zone."
+    : controlMode.fail_safe_active || controlMode.provider_failure_latched ? "Fail-safe is active; operator recovery and fresh validation are required."
+    : policyStatus?.ready !== true ? "Control is locked until command-limit policy readiness is confirmed."
+    : null;
 
   const updateMode = async (action: () => Promise<unknown>) => {
     setModeBusy(true);
@@ -297,9 +303,10 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
               {recommendation.validation.rejection_reason && <div className="badge danger">Rejected: {recommendation.validation.rejection_reason}</div>}
             </div>
 
-            {canOperate && <Button variant="primary" onClick={applyRecommendation} disabled={loading || recommendation.validation.validated_setpoint === null}>
-              {loading ? "Applying..." : "Apply Validated Recommendation (Simulated Control)"}
+            {canOperate && <Button variant={controlBlockedReason || recommendation.validation.validated_setpoint === null ? "neutral" : "primary"} onClick={applyRecommendation} disabled={loading || recommendation.validation.validated_setpoint === null || Boolean(controlBlockedReason)}>
+              {loading ? "Applying..." : controlBlockedReason ? "Control locked" : "Apply Validated Recommendation (Simulated Control)"}
             </Button>}
+            {controlBlockedReason && <p className="control-lock-reason" role="status">{controlBlockedReason}</p>}
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>

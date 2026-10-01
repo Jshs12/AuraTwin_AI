@@ -19,6 +19,8 @@ export function ZoneList({
       {zones.map((zone) => {
         const mon = monMap[zone.zone_id];
         const isMonitored = !!mon;
+        const people = mon?.last_people_count ?? zone.current_occupancy;
+        const utilization = zone.capacity > 0 ? Math.min(100, Math.max(0, people / zone.capacity * 100)) : 0;
         const stateColor = mon?.status === "MONITORING" ? "var(--success)"
           : mon?.status?.includes("COOLDOWN") ? "var(--accent)"
           : mon?.status?.includes("ERROR") ? "var(--warning)"
@@ -32,7 +34,7 @@ export function ZoneList({
             role="button"
             tabIndex={0}
             aria-label={`Select zone ${zone.name}`}
-            onKeyDown={(e) => e.key === "Enter" && onSelectZone(zone.zone_id)}
+            onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && onSelectZone(zone.zone_id)}
             style={{ borderLeft: `3px solid ${isMonitored ? stateColor : "var(--border)"}` }}
           >
             <div className="zone-header">
@@ -58,6 +60,12 @@ export function ZoneList({
                 {mon.status} {mon.cooldown_remaining_seconds > 0 ? `· ${mon.cooldown_remaining_seconds}s` : ""}
               </div>
             )}
+            <div className="zone-card-metrics">
+              <span>Occupancy <b>{people} / {zone.capacity}</b></span>
+              <div className="bar-track"><i style={{ width: `${utilization}%` }} /></div>
+              <span>Temperature <b>{zone.current_temperature == null ? "—" : `${zone.current_temperature.toFixed(1)}°C`}</b></span>
+              <span>HVAC setpoint <b>{zone.current_setpoint == null ? "—" : `${zone.current_setpoint.toFixed(1)}°C`}</b></span>
+            </div>
           </div>
         );
       })}

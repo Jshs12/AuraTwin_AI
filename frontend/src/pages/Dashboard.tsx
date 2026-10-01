@@ -19,6 +19,8 @@ import { api } from "../services/api";
 import { IntegrationConfiguration } from "../components/integrations/IntegrationConfiguration";
 import { BuildingOnboarding } from "../components/integrations/BuildingOnboarding";
 import { KnowledgePanel } from "../components/knowledge/KnowledgePanel";
+import { BuildingCommandCenter } from "../components/dashboard/BuildingCommandCenter";
+import { defaultZoneSelection } from "../utils/zoneSelection";
 
 type Section = "Overview" | "Zones" | "Occupancy" | "Energy" | "Knowledge" | "Events" | "Integrations" | "Access" | "Audit";
 
@@ -48,6 +50,10 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
 
   // Zone configuration is persistent and scoped to the selected authorized building.
   const { zones, loading: zonesLoading, error: zonesError } = useZones(selectedBuildingId);
+  useEffect(() => {
+    const nextSelection = defaultZoneSelection(zones, selectedZoneId);
+    if (nextSelection !== selectedZoneId) setSelectedZoneId(nextSelection);
+  }, [zones, selectedZoneId]);
   const updateDemoSummary = useCallback((summary: DemoBuildingSummary) => setDemoSummary(summary), []);
   const energyHistory = demoSummary?.scenario_id
     ? demoSummary.energy_history.map(sample => ({
@@ -85,6 +91,11 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
         {/* ── OVERVIEW ─────────────────────────────────────────── */}
         {activeSection === "Overview" && (
           <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+            <BuildingCommandCenter
+              buildingName={buildings.find(item => item.building_id === selectedBuildingId)?.name ?? ""}
+              zones={zones} status={monitoring.status} events={monitoring.events}
+              power={displayPower} energyHistory={energyHistory} demoSummary={demoSummary}
+            />
             {role === "OPERATOR" && <DemoModePanel onSummary={updateDemoSummary} />}
             <Summary
               zones={zones}
@@ -113,7 +124,7 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
 
         {/* ── ZONES ────────────────────────────────────────────── */}
         {activeSection === "Zones" && (
-          <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: "1.25rem" }}>
+          <div className="zones-workspace">
             <div>
               {zonesLoading ? (
                 <div className="card" style={{ color: "var(--text-muted)" }}>Loading zones…</div>
@@ -132,8 +143,8 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
               {selectedZoneId ? (
                 <ZoneDetail zoneId={selectedZoneId} demoPhase={monitoring.status?.demo_phase ?? null} canOperate={role === "OPERATOR"} />
               ) : (
-                <div className="card" style={{ color: "var(--text-muted)", textAlign: "center", padding: "3rem" }}>
-                  Select a zone to view details
+                <div className="card product-empty-state" style={{ color: "var(--text-muted)", textAlign: "center", padding: "3rem" }}>
+                  {zones.length ? "Choose a configured zone to inspect its state." : "No active zones are available for this building."}
                 </div>
               )}
             </div>
@@ -143,6 +154,20 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
         {/* ── OCCUPANCY ────────────────────────────────────────── */}
         {activeSection === "Occupancy" && (
           <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+            <section className="occupancy-overview card">
+              <div className="section-header"><div><p className="eyebrow">PEOPLE & SPACE</p><h1>Occupancy</h1><p>Current zone snapshot · source depends on configured provider.</p></div><span className="badge warning">SIMULATED / PROVIDER REPORTED</span></div>
+              <div className="occupancy-overview-grid">
+                <div className="occupancy-total"><strong>{monitoring.totalOccupancy}</strong><span>people in monitored zones</span><small>{monitoring.occupiedZones} occupied · {monitoring.status?.zones_enabled ?? 0} monitored</small></div>
+                <div className="occupancy-zone-breakdown">{(monitoring.status?.zones ?? []).map(item => {
+                  const zone = zones.find(candidate => candidate.zone_id === item.zone_id);
+                  const count = item.last_people_count;
+                  const capacity = zone?.capacity ?? 0;
+                  const percent = capacity > 0 ? Math.min(100, count / capacity * 100) : 0;
+                  return <div key={item.zone_id} className="occupancy-bar-row"><span>{zone?.name ?? item.zone_id}</span><div className="bar-track"><i style={{ width: `${percent}%` }} /></div><b>{count}<small> / {capacity || "—"}</small></b></div>;
+                })}{!monitoring.status?.zones.length && <p className="muted">Start monitoring to display zone occupancy snapshots.</p>}</div>
+              </div>
+              <p className="muted">Manual YOLO upload below is an independent test and does not feed autonomous demo monitoring.</p>
+            </section>
             <MonitoringPanel
               status={monitoring.status}
               error={monitoring.error}

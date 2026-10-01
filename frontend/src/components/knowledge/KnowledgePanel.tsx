@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { api } from "../../services/api";
 import type { KnowledgeDocument, KnowledgeResult } from "../../services/api";
-import { knowledgeStatusTone, readableKnowledgeLabel } from "../../utils/knowledgePresentation";
+import { knowledgeLoadFailure, knowledgeStatusTone, readableKnowledgeLabel } from "../../utils/knowledgePresentation";
+import { EmptyState, ErrorState } from "../common";
 
 const categories = ["HVAC_MANUAL", "EQUIPMENT_MANUAL", "OPERATING_POLICY", "MAINTENANCE_PROCEDURE", "BUILDING_GUIDE", "COMFORT_POLICY", "SAFETY_POLICY", "OTHER"];
 
@@ -11,6 +12,7 @@ export function KnowledgePanel({ buildingId, canManage }: { buildingId?: string;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [diagnostic, setDiagnostic] = useState("");
+  const [loadFailure, setLoadFailure] = useState<ReturnType<typeof knowledgeLoadFailure> | null>(null);
   const [notice, setNotice] = useState("");
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<KnowledgeResult[]>([]);
@@ -19,10 +21,10 @@ export function KnowledgePanel({ buildingId, canManage }: { buildingId?: string;
   const fileInput = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
-    if (!buildingId) { setDocuments([]); return; }
-    setLoading(true); setError(""); setDiagnostic("");
+    if (!buildingId) { setDocuments([]); setLoadFailure(null); return; }
+    setLoading(true); setError(""); setDiagnostic(""); setLoadFailure(null);
     try { setDocuments(await api.getKnowledgeDocuments(buildingId)); }
-    catch (cause) { setDocuments([]); setError("Building knowledge could not be loaded. Check your access or try again."); setDiagnostic(cause instanceof Error ? cause.message : "Request failed."); }
+    catch (cause) { setLoadFailure(knowledgeLoadFailure(cause)); }
     finally { setLoading(false); }
   }, [buildingId]);
   useEffect(() => { void load(); }, [load]);
@@ -83,11 +85,15 @@ export function KnowledgePanel({ buildingId, canManage }: { buildingId?: string;
         <p>Building documents and source-grounded passages. Retrieved text cannot issue equipment commands.</p></div>
       <span className="badge primary">BUILDING SCOPED</span>
     </header>
+    {loadFailure && <ErrorState title={loadFailure.title} onRetry={() => void load()} details={<code>{loadFailure.detail}</code>}>
+      {loadFailure.description}
+    </ErrorState>}
     {error && <div className="knowledge-alert" role="alert"><strong>{error}</strong>{diagnostic && <details><summary>Technical details</summary><code>{diagnostic}</code></details>}</div>}
     {notice && <div className="knowledge-notice" role="status">{notice}</div>}
     <section className="knowledge-card card" aria-labelledby="knowledge-documents-title">
       <div className="knowledge-section-heading"><div><h2 id="knowledge-documents-title">Documents</h2><p>Only active READY versions can be retrieved.</p></div><span className="badge neutral">{documents.filter(item => item.management_status === "ACTIVE").length} ACTIVE</span></div>
       {loading ? <div className="knowledge-skeleton" aria-label="Loading documents"><span /><span /><span /></div>
+        : loadFailure ? null
         : documents.length ? <div className="knowledge-documents">{documents.map(document => {
           const active = document.versions.find(version => version.is_active && version.ingestion_status === "READY");
           const latest = document.versions.at(-1);
@@ -110,10 +116,12 @@ export function KnowledgePanel({ buildingId, canManage }: { buildingId?: string;
               <button className="button" disabled={busyDocument === document.document_id} onClick={() => void archive(document)}>Archive</button>
             </div>}
           </article>;
-        })}</div> : <div className="knowledge-empty"><strong>No building documents yet</strong><p>Register an approved manual or policy to begin building a source library.</p></div>}
-      {canManage && <form className="knowledge-upload" onSubmit={event => void submitDocument(event)}>
+        })}</div> : <EmptyState title="No building knowledge yet" action={canManage ? <button className="button primary" type="button" onClick={() => document.getElementById("knowledge-document-name")?.focus()}>Add a document</button> : undefined}>
+          {canManage ? "Register an approved manual or policy to begin building this source library." : "An authorized operator can add approved manuals and policies for this building."}
+        </EmptyState>}
+      {canManage && <form id="knowledge-upload" className="knowledge-upload" onSubmit={event => void submitDocument(event)}>
         <div className="knowledge-section-heading"><div><h2>Add a document</h2><p>PDF, UTF-8 TXT, and Markdown are supported. Maximum file size: 10 MiB.</p></div></div>
-        <div className="knowledge-form-grid"><label>Document name<input name="name" required minLength={1} maxLength={240} placeholder="Cooling policy" /></label>
+        <div className="knowledge-form-grid"><label>Document name<input id="knowledge-document-name" name="name" required minLength={1} maxLength={240} placeholder="Cooling policy" /></label>
           <label>Category<select name="category" defaultValue="HVAC_MANUAL">{categories.map(category => <option key={category} value={category}>{readableKnowledgeLabel(category)}</option>)}</select></label>
           <label className="knowledge-file">File<input ref={fileInput} name="file" type="file" accept=".pdf,.txt,.md,.markdown,application/pdf,text/plain,text/markdown" required /></label>
           <label>Source reference (optional)<input name="source_reference" maxLength={500} placeholder="Published reference or internal document label" /></label>
