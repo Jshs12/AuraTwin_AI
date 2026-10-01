@@ -364,6 +364,13 @@ async def health_check():
     return {"status": "ok", "message": "AuraTwin AI V2 Backend is running"}
 
 
+@app.get("/api/control/policy-status")
+async def control_policy_status(request: Request,
+                                _user=Depends(require_permission(Permission.CONTROL_EXECUTE))):
+    """Expose safe command-policy readiness; never return configured values."""
+    return control_service.safety.command_policy_status()
+
+
 @app.get("/api/demo/status")
 async def get_demo_status(request: Request, _user=Depends(require_any_permission(Permission.SYSTEM_READ, Permission.BUILDING_READ))):
     _require_demo_scope(_user, request)

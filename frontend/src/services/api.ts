@@ -101,10 +101,35 @@ export const api = {
     if (!res.ok) throw new Error("Unable to load audit records");
     return (await res.json()).records as Array<{ timestamp: string; user_id: string | null; role: string | null; action: string; resource: string; resource_id: string | null; building_id: string | null; success: boolean; metadata: Record<string, unknown> }>;
   },
-  async getBuildings(): Promise<Array<{ building_id: string; building_key: string; organization_id: string; name: string }>> {
+  async getBuildings(): Promise<Array<{ building_id: string; building_key: string; organization_id: string; name: string; slug: string }>> {
     const res = await authFetch(`${API_BASE}/buildings`);
     if (!res.ok) throw new Error("Unable to fetch authorized buildings");
     return (await res.json()).buildings;
+  },
+  async getOrganizations(): Promise<Array<{ organization_id: string; name: string; slug: string }>> {
+    const res = await authFetch(`${API_BASE}/organizations`);
+    if (!res.ok) throw new Error("Unable to load authorized organizations");
+    return (await res.json()).organizations;
+  },
+  async createBuilding(payload: { organization_id: string; name: string; slug: string; timezone: string }) {
+    const res = await authFetch(`${API_BASE}/buildings`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    if (!res.ok) await throwApiError(res, "Unable to create building");
+    return res.json();
+  },
+  async createFloor(buildingId: string, payload: { name: string; floor_key: string; level_number?: number }) {
+    const res = await authFetch(`${API_BASE}/buildings/${encodeURIComponent(buildingId)}/floors`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    if (!res.ok) await throwApiError(res, "Unable to create floor");
+    return res.json();
+  },
+  async createZone(floorId: string, payload: Record<string, unknown>) {
+    const res = await authFetch(`${API_BASE}/floors/${encodeURIComponent(floorId)}/zones`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    if (!res.ok) await throwApiError(res, "Unable to create zone");
+    return res.json();
+  },
+  async getCommandPolicyStatus() {
+    const res = await authFetch(`${API_BASE}/control/policy-status`);
+    if (!res.ok) throw new Error("Unable to load control policy readiness");
+    return res.json() as Promise<{ ready: boolean; missing_configuration: string[]; invalid_configuration: string[]; reason_code: string | null }>;
   },
 
   async getIntegrations(buildingId: string) {
@@ -191,6 +216,20 @@ export const api = {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || "Unable to add point mapping");
+    return data;
+  },
+  async updateDevicePoint(pointId: string, payload: Record<string, unknown>) {
+    const res = await authFetch(`${API_BASE}/point-mappings/${encodeURIComponent(pointId)}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "Unable to update point mapping");
+    return data;
+  },
+  async deactivatePointMapping(pointId: string) {
+    const res = await authFetch(`${API_BASE}/point-mappings/${encodeURIComponent(pointId)}`, { method: "DELETE" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "Unable to deactivate point mapping");
     return data;
   },
   async decidePointMapping(pointId: string, decision: "confirm" | "reject") {

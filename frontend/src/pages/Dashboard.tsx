@@ -17,6 +17,7 @@ import { AccessPanel } from "../components/security/AccessPanel";
 import { AuditPanel } from "../components/security/AuditPanel";
 import { api } from "../services/api";
 import { IntegrationConfiguration } from "../components/integrations/IntegrationConfiguration";
+import { BuildingOnboarding } from "../components/integrations/BuildingOnboarding";
 
 type Section = "Overview" | "Zones" | "Occupancy" | "Energy" | "Events" | "Integrations" | "Access" | "Audit";
 
@@ -24,16 +25,18 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
   const [activeSection, setActiveSection] = useState<Section>("Overview");
   const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
   const [demoSummary, setDemoSummary] = useState<DemoBuildingSummary | null>(null);
-  const [buildings, setBuildings] = useState<Array<{ building_id: string; building_key: string; name: string }>>([]);
+  const [buildings, setBuildings] = useState<Array<{ building_id: string; building_key: string; organization_id: string; name: string }>>([]);
   const [selectedBuildingId, setSelectedBuildingId] = useState<string | undefined>();
 
-  useEffect(() => {
-    api.getBuildings().then(items => {
-      setBuildings(items);
-      setSelectedBuildingId(current => current && items.some(item => item.building_id === current)
-        ? current : items[0]?.building_id);
-    }).catch(() => setBuildings([]));
+  const refreshBuildings = useCallback(async () => {
+    const items = await api.getBuildings();
+    setBuildings(items);
+    setSelectedBuildingId(current => current && items.some(item => item.building_id === current)
+      ? current : items[0]?.building_id);
   }, []);
+  useEffect(() => {
+    refreshBuildings().catch(() => setBuildings([]));
+  }, [refreshBuildings]);
 
   // Centralized state from WebSocket + monitoring API
   const monitoring = useMonitoring();
@@ -83,6 +86,7 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
               occupiedZones={monitoring.occupiedZones}
               monitoringStatus={monitoring.status}
               currentPower={displayPower}
+              demoSummary={demoSummary}
             />
             <MonitoringPanel
               status={monitoring.status}
@@ -176,7 +180,10 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
           </div>
         )}
         {activeSection === "Access" && <AccessPanel role={role} />}
-        {activeSection === "Integrations" && role === "OPERATOR" && <IntegrationConfiguration buildingId={selectedBuildingId} zones={zones} />}
+        {activeSection === "Integrations" && role === "OPERATOR" && <>
+          <BuildingOnboarding buildingId={selectedBuildingId} onSelectBuilding={setSelectedBuildingId} onBuildingsChanged={refreshBuildings} />
+          <IntegrationConfiguration buildingId={selectedBuildingId} zones={zones} />
+        </>}
         {activeSection === "Audit" && role === "ADMIN" && <AuditPanel />}
       </main>
     </div>

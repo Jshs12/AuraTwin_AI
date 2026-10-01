@@ -71,12 +71,14 @@ export function MonitoringPanel({ status, error, connected, connectionStatus = c
         <>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem", marginBottom: "1rem" }}>
             <div className="stat-block">
-              <div className="stat-label">Monitored</div>
-              <div className="stat-value">{status.zones_enabled} / {status.zones_total}</div>
+              <div className="stat-label">{status.monitoring_scope === "DEMO_SCENARIO" ? "DEMO SIMULATION" : "CONFIGURED BUILDING MONITORING"}</div>
+              <div className="stat-value">{status.monitoring_scope === "DEMO_SCENARIO"
+                ? `${status.demo_zones_total ?? status.zones_enabled} / ${status.configured_zones_total ?? status.zones_total} DEMO ZONES`
+                : `${status.zones_enabled} / ${status.zones_total} ACTIVE ZONES`}</div>
               <small style={{ color: "var(--text-muted)" }}>
                 {status.monitoring_scope === "DEMO_SCENARIO"
-                  ? `DEMO SCENARIO · ${status.demo_zones_total ?? status.zones_enabled} selected; configured building has ${status.configured_zones_total ?? status.zones_total} active zones`
-                  : status.monitoring_scope === "CONFIGURED_BUILDING" ? "Configured building scope" : "Configured building scope when started"}
+                  ? `Demo scenario selection only. Configured building monitoring scope: ${status.configured_zones_total ?? status.zones_total} active zones.`
+                  : status.monitoring_scope === "CONFIGURED_BUILDING" ? "All active zones in the authorized configured building scope." : "Configured building scope is selected when monitoring starts."}
               </small>
             </div>
             <div className="stat-block">

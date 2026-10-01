@@ -29,6 +29,18 @@ const eventColors: Record<string, string> = {
   CONTROL_COMMAND: "#ff6b6b",
   ENERGY_UPDATE: "#4a9eff",
   HVAC_RESPONSE: "#6cde7c",
+  PROVIDER_FAILURE: "#ff6b6b",
+  PROVIDER_RECOVERY: "#f0a050",
+  FAIL_SAFE_ACTIVATED: "#ff6b6b",
+  AUTO_CONTROL_RESUMED: "#6cde7c",
+  MANUAL_OVERRIDE_ENABLED: "#f0a050",
+  MANUAL_OVERRIDE_DISABLED: "#4a9eff",
+  CONTROL_ENABLED: "#6cde7c",
+  CONTROL_DISABLED: "#f0a050",
+  COMMAND_BLOCKED_BY_OVERRIDE: "#ff6b6b",
+  COMMAND_BLOCKED_BY_CONTROL_DISABLE: "#ff6b6b",
+  RUNTIME_OBSERVATION_APPLIED: "#6cde7c",
+  RUNTIME_OBSERVATION_REJECTED: "#ff6b6b",
 };
 
 function getPayloadSummary(event: SystemEvent): string {
@@ -55,6 +67,8 @@ function getPayloadSummary(event: SystemEvent): string {
     return `requested → ${p.requested_setpoint}°C`;
   if (event.event_type === "CONTROL_VALIDATION" && typeof p.outcome === "string")
     return `safety: ${p.outcome}`;
+  if (event.event_type === "RECOMMENDATION_REJECTED" || event.event_type === "CONTROL_REJECTED" || event.event_type === "COMMAND_BLOCKED_BY_OVERRIDE" || event.event_type === "COMMAND_BLOCKED_BY_CONTROL_DISABLE")
+    return `REJECTED · not applied${typeof p.reason === "string" ? ` · ${p.reason}` : typeof p.reason_code === "string" ? ` · ${p.reason_code}` : ""}`;
   if (event.event_type === "CONTROL_ACKNOWLEDGED" && typeof p.acknowledged === "boolean")
     return p.acknowledged ? `applied ${p.applied_setpoint}°C` : `not acknowledged · ${p.error_code ?? "failed"}`;
   if (event.event_type === "HVAC_RESPONSE" && typeof p.hvac_mode === "string")
@@ -89,7 +103,7 @@ export function EventStream({ events, connectionStatus = "disconnected" }: Event
           return (
             <div key={event.event_id} style={{
               display: "grid",
-              gridTemplateColumns: "60px 140px 1fr auto",
+              gridTemplateColumns: "60px 140px 1fr auto auto",
               gap: "0.5rem",
               alignItems: "center",
               padding: "0.3rem 0.5rem",
@@ -104,6 +118,9 @@ export function EventStream({ events, connectionStatus = "disconnected" }: Event
               </div>
               <div style={{ color: "var(--text-secondary)", fontSize: "0.7rem" }}>
                 {getPayloadSummary(event)}
+              </div>
+              <div style={{ color: "var(--text-muted)", fontSize: "0.65rem" }}>
+                {event.source}{((event.payload as Record<string, unknown>).simulated === true) ? " · SIMULATED" : ""}
               </div>
               <div style={{ color: "var(--text-muted)", fontSize: "0.65rem" }}>
                 {event.zone_id.replace(/_/g, " ")}

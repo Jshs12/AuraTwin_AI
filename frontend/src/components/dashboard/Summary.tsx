@@ -1,4 +1,5 @@
 import type { Zone, MonitoringStatus } from "../../types/api";
+import type { DemoBuildingSummary } from "../../types/api";
 
 interface SummaryProps {
   zones: Zone[];
@@ -6,11 +7,16 @@ interface SummaryProps {
   occupiedZones: number;
   monitoringStatus: MonitoringStatus | null;
   currentPower: number;
+  demoSummary?: DemoBuildingSummary | null;
 }
 
-export function Summary({ zones, totalOccupancy, occupiedZones, monitoringStatus, currentPower }: SummaryProps) {
+export function Summary({ zones, totalOccupancy, occupiedZones, monitoringStatus, currentPower, demoSummary }: SummaryProps) {
   const monitoredZones = monitoringStatus?.zones_enabled ?? 0;
   const totalZones = monitoringStatus?.zones_total ?? zones.length;
+  const temperatures = zones.map(zone => zone.current_temperature).filter((value): value is number => typeof value === "number");
+  const setpoints = zones.map(zone => zone.current_setpoint).filter((value): value is number => typeof value === "number");
+  const averageTemperature = demoSummary?.average_zone_temperature ?? (temperatures.length ? temperatures.reduce((a, b) => a + b, 0) / temperatures.length : null);
+  const averageSetpoint = demoSummary?.average_setpoint ?? (setpoints.length ? setpoints.reduce((a, b) => a + b, 0) / setpoints.length : null);
 
   return (
     <div className="summary-grid">
@@ -26,13 +32,13 @@ export function Summary({ zones, totalOccupancy, occupiedZones, monitoringStatus
       </div>
 
       <div className="card">
-        <div className="card-title">Monitored Zones</div>
-        <div>
-          <span className="metric-value">{monitoredZones}</span>
-          <span className="metric-unit"> / {totalZones}</span>
-        </div>
+        <div className="card-title">{monitoringStatus?.demo_simulation ? "DEMO SIMULATION SCOPE" : "CONFIGURED BUILDING MONITORING"}</div>
+        <div><span className="metric-value">{monitoringStatus?.demo_simulation ? (monitoringStatus.demo_zones_total ?? monitoredZones) : monitoredZones}</span>
+          <span className="metric-unit"> / {monitoringStatus?.demo_simulation ? (monitoringStatus.configured_zones_total ?? zones.length) : totalZones} {monitoringStatus?.demo_simulation ? "demo zones" : "active zones"}</span></div>
         <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.25rem" }}>
-          Occupied monitored: {occupiedZones} / {monitoredZones}
+          {monitoringStatus?.demo_simulation
+            ? `Demo scenario selection; configured building has ${monitoringStatus.configured_zones_total ?? zones.length} active zones.`
+            : `Configured scope · occupied monitored: ${occupiedZones} / ${monitoredZones}`}
         </div>
       </div>
 
@@ -57,15 +63,27 @@ export function Summary({ zones, totalOccupancy, occupiedZones, monitoringStatus
       </div>
 
       <div className="card">
-        <div className="card-title">Current Power</div>
+        <div className="card-title">Runtime Power</div>
         <div>
           <span className="metric-value">{currentPower.toFixed(1)}</span>
           <span className="metric-unit"> kW</span>
         </div>
         <div style={{ marginTop: "0.25rem" }}>
-          <span className="badge warning">SIMULATED</span>
+          <span className="badge warning">SIMULATED · NOT METER DATA</span>
         </div>
       </div>
+      <div className="card"><div className="card-title">Average Zone Temperature</div>
+        <div className="metric-value">{averageTemperature == null ? "—" : `${averageTemperature.toFixed(1)}°C`}</div>
+        <small className="muted">{demoSummary?.scenario_id ? "DEMO SIMULATION" : "Configured ZoneState snapshot"}</small>
+      </div>
+      <div className="card"><div className="card-title">Average Setpoint</div>
+        <div className="metric-value">{averageSetpoint == null ? "—" : `${averageSetpoint.toFixed(1)}°C`}</div>
+        <small className="muted">{demoSummary?.scenario_id ? "SIMULATED HVAC" : "Configured ZoneState snapshot"}</small>
+      </div>
+      {demoSummary?.scenario_id && <div className="card"><div className="card-title">Demo Energy & Cost</div>
+        <div>{demoSummary.simulated_energy_kwh.toFixed(2)} kWh · {demoSummary.currency} {demoSummary.simulated_cost.toFixed(2)}</div>
+        <small className="muted">DEMO SIMULATION · NOT METER DATA · no savings claim</small>
+      </div>}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useZoneState } from "../../hooks/useZoneState";
 import { Card, OccupancyBadge, Button } from "../common";
 import { Timeline } from "../events/Timeline";
@@ -8,6 +8,7 @@ import { api, ApiRequestError } from "../../services/api";
 export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: string | null; demoPhase?: string | null; canOperate?: boolean }) {
   const [modeBusy, setModeBusy] = useState(false);
   const [modeError, setModeError] = useState<ApiRequestError | Error | null>(null);
+  const [policyStatus, setPolicyStatus] = useState<Awaited<ReturnType<typeof api.getCommandPolicyStatus>> | null>(null);
   const {
     state,
     history,
@@ -19,6 +20,14 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
     generateRecommendation,
     applyRecommendation,
   } = useZoneState(zoneId);
+
+  useEffect(() => {
+    let active = true;
+    setPolicyStatus(null);
+    if (zoneId && canOperate) api.getCommandPolicyStatus().then(value => { if (active) setPolicyStatus(value); })
+      .catch(() => { if (active) setPolicyStatus(null); });
+    return () => { active = false; };
+  }, [zoneId, canOperate]);
 
   if (!zoneId) {
     return (
@@ -169,7 +178,7 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
                 onClick={() => updateMode(() => api.setManualOverride(zoneId, !controlMode.manual_override))}>
                 {controlMode.manual_override ? "Deactivate Manual Override" : "Enable Manual Override"}
               </Button>
-              <Button disabled={modeBusy} variant={controlMode.control_enabled ? "neutral" : "primary"}
+              <Button disabled={modeBusy || (!controlMode.control_enabled && policyStatus?.ready !== true)} variant={controlMode.control_enabled ? "neutral" : "primary"}
                 onClick={() => updateMode(() => api.setZoneControlEnabled(zoneId, !controlMode.control_enabled))}>
                 {controlMode.control_enabled ? "Disable Autonomous Control" : "Re-enable Autonomous Control"}
               </Button>
@@ -178,14 +187,24 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
           <div style={{ fontSize: "0.7rem", color: "var(--text-muted)", marginTop: "0.35rem" }}>
             Manual override pauses AuraTwin commands; it does not send a manual HVAC setpoint.
           </div>
-          {modeError && <div className="demo-error" role="alert" style={{ marginTop: "0.5rem" }}>
+          {!controlMode?.control_enabled && policyStatus && !policyStatus.ready && <div role="status" style={{ marginTop: ".5rem", borderLeft: "3px solid var(--warning, #d29922)", padding: ".65rem", background: "var(--surface-elevated)", borderRadius: 6 }}>
+            <strong>CONTROL UNAVAILABLE</strong><br />Safety command-limit policy is {policyStatus.reason_code === "COMMAND_POLICY_INCOMPLETE" ? "incomplete" : "invalid"}.
+            {!!policyStatus.missing_configuration.length && <><br />Missing: {policyStatus.missing_configuration.join(", ")}</>}
+            {!!policyStatus.invalid_configuration.length && <><br />Invalid: {policyStatus.invalid_configuration.join(", ")}</>}
+          </div>}
+          {!controlMode?.control_enabled && !policyStatus && canOperate && <div role="status" style={{ marginTop: ".5rem", color: "var(--text-muted)" }}>
+            Control readiness could not be verified. Re-enable remains disabled until the backend policy status is available.
+          </div>}
+          {modeError && <div className={modeError instanceof ApiRequestError && modeError.code ? undefined : "demo-error"}
+            role={modeError instanceof ApiRequestError && modeError.code ? "status" : "alert"}
+            style={{ marginTop: "0.5rem", ...(modeError instanceof ApiRequestError && modeError.code ? { borderLeft: "3px solid var(--warning, #d29922)", padding: ".65rem", background: "var(--surface-elevated)", borderRadius: 6 } : {}) }}>
             {modeError instanceof ApiRequestError && modeError.code === "COMMAND_POLICY_INCOMPLETE" ? <>
               <strong>CONTROL UNAVAILABLE</strong><br />Safety command-limit policy is incomplete.
               {!!modeError.missingConfiguration?.length && <><br />Missing configuration: {modeError.missingConfiguration.join(", ")}</>}
             </> : modeError instanceof ApiRequestError && modeError.code === "COMMAND_POLICY_INVALID" ? <>
               <strong>CONTROL UNAVAILABLE</strong><br />Safety command-limit policy is invalid.
               {!!modeError.invalidConfiguration?.length && <><br />Invalid configuration: {modeError.invalidConfiguration.join(", ")}</>}
-            </> : <>{modeError.message}</>}
+            </> : modeError instanceof ApiRequestError && modeError.code ? <><strong>{modeError.code.replaceAll("_", " ")}</strong><br />{modeError.message}</> : <>{modeError.message}</>}
           </div>}
           {controlResult && (
             <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.5rem" }}>
