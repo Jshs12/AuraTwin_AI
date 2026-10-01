@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from backend.security.models import User
 from backend.security.repository import UserRepository
 from backend.security.roles import Role
-from backend.database.models import (BuildingRecord, OrganizationRecord,
+from backend.database.models import (BuildingRecord, OrganizationMembershipRecord, OrganizationRecord,
                                      UserBuildingAccessRecord, UserRecord)
 
 
@@ -32,6 +32,7 @@ class BuildingData:
     slug: str
     timezone: str
     address: dict
+    building_key: str = ""
     archived_at: datetime | None = None
 
 
@@ -69,7 +70,8 @@ class SQLAlchemyBuildingRepository:
         with self.sessions.begin() as session:
             session.add(BuildingRecord(building_id=UUID(building.building_id),
                 organization_id=UUID(building.organization_id), name=building.name,
-                slug=building.slug, timezone=building.timezone, address=building.address,
+                slug=building.slug, building_key=building.building_key or building.slug,
+                timezone=building.timezone, address=building.address,
                 archived_at=building.archived_at))
 
     def get(self, building_id: str) -> BuildingData | None:
@@ -87,7 +89,7 @@ class SQLAlchemyBuildingRepository:
     @staticmethod
     def _data(row: BuildingRecord) -> BuildingData:
         return BuildingData(str(row.building_id), str(row.organization_id), row.name,
-            row.slug, row.timezone, dict(row.address or {}), row.archived_at)
+            row.slug, row.timezone, dict(row.address or {}), row.building_key, row.archived_at)
 
 
 class SQLAlchemyUserRepository(UserRepository):
@@ -115,8 +117,21 @@ class SQLAlchemyUserRepository(UserRepository):
             row = UserRecord(user_id=UUID(user.user_id), email=user.email.strip(),
                 email_normalized=user.email.strip().lower(),
                 password_hash=user.password_hash, role=user.role.value, active=user.active)
-            row.building_access = [UserBuildingAccessRecord(building_id=UUID(building_id))
-                                   for building_id in user.building_ids]
+            organizations = {UUID(org_id) for org_id in user.organization_ids}
+            for building_identifier in user.building_ids:
+                try:
+                    building_uuid = UUID(building_identifier)
+                    building = session.get(BuildingRecord, building_uuid)
+                except ValueError:
+                    building = session.scalar(select(BuildingRecord).where(
+                        BuildingRecord.building_key == building_identifier))
+                    building_uuid = building.building_id if building else None
+                if building is None or building_uuid is None or building.archived_at is not None:
+                    raise ValueError("Building access assignment is invalid")
+                row.building_access.append(UserBuildingAccessRecord(building_id=building_uuid))
+                organizations.add(building.organization_id)
+            row.organization_memberships = [OrganizationMembershipRecord(organization_id=organization_id)
+                                            for organization_id in organizations]
             session.add(row)
 
     def list_users(self) -> list[User]:
@@ -139,4 +154,6 @@ class SQLAlchemyUserRepository(UserRepository):
     @staticmethod
     def _user(row: UserRecord) -> User:
         building_ids = frozenset(str(assignment.building_id) for assignment in row.building_access)
-        return User(str(row.user_id), row.email, row.password_hash, Role(row.role), row.active, building_ids)
+        organization_ids = frozenset(str(item.organization_id) for item in row.organization_memberships)
+        return User(str(row.user_id), row.email, row.password_hash, Role(row.role), row.active,
+                    building_ids, organization_ids)

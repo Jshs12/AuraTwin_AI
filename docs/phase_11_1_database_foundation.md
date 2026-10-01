@@ -1,5 +1,9 @@
 # Phase 11.1 — Database Foundation and Architecture Audit
 
+> Historical Phase 11.1 audit. Runtime persistence/auth/configuration cutover is
+> implemented in Phase 11.2; see `phase_11_2_persistent_configuration.md` for
+> the current application behavior.
+
 ## Audit scope and current application shape
 
 AuraTwin is a FastAPI application assembled in `backend/api/main.py`. That
@@ -62,16 +66,14 @@ The main flows are:
 
 The intended boundary is `FastAPI -> application services -> repository
 protocols -> SQLAlchemy adapters -> PostgreSQL`. Domain/auth code should call
-repository methods and should not issue SQL itself. This phase adds the
-foundation and an SQLAlchemy adapter for the existing authentication repository
-contract plus organization/building repositories. The running FastAPI app
-continues to use its in-memory stores; a later cutover must add lifecycle-aware
-repository injection and transaction boundaries without changing authorization
-or safety rules.
+repository methods and should not issue SQL itself. At the end of Phase 11.1,
+the running FastAPI app continued to use in-memory stores. Phase 11.2 has since
+completed the local SQLite app wiring and repository-backed configuration/auth
+cutover while retaining runtime-only ZoneState, telemetry, and events.
 
-Database configuration is explicit. Importing AuraTwin does not create an
-engine, open a connection, or require `DATABASE_URL`. Creating an engine or
-running a migration requires that variable. The URL is excluded from
+At the end of Phase 11.1, database configuration was opt-in. The Phase 11.2
+local application now defaults to `data/auratwin.db`; the settings object itself
+still permits no URL for isolated foundation tests. The URL is excluded from
 configuration representations and must not be logged.
 
 ## Entity model
@@ -131,21 +133,17 @@ repository interface and a defined source-of-truth, idempotency, retention,
 and tenant/access policy. Audit persistence should be prioritized before
 production use because the current audit deque is process-local.
 
-Also not implemented: live Supabase connection, schema deployment, app startup
-database wiring, onboarding UI, multi-building CRUD routes, real BACnet, camera
-image storage, telemetry history, or conversion of the current demo JSON file
-into database records.
+Also not implemented as of Phase 11.1: live Supabase connection, schema
+deployment, onboarding UI, real BACnet, camera image storage, telemetry history,
+or historical data persistence. Phase 11.2 has since added local database
+startup wiring, multi-building configuration routes, and the idempotent import
+of legacy demo zones.
 
 ## Next Phase 11 steps
 
-1. Add explicit application-level repository/session dependency injection and
-   move organizations/buildings/floors/zones to persistent configuration,
-   including database-backed zone-to-building authorization.
-2. Add persistent auth/access and audit repository cutover while preserving
-   Argon2, JWT, the exact two roles, and existing building-access checks.
-3. Add privacy-minimized occupancy and time-series telemetry persistence with
+1. Add privacy-minimized occupancy and time-series telemetry persistence with
    retention/partitioning policies.
-4. Add recommendation/control/event history and durable operational-state
+2. Add recommendation/control/event history and durable operational-state
    design before any real control integration.
-5. Only then configure a Supabase PostgreSQL project and deploy reviewed
+3. Only then configure a Supabase PostgreSQL project and deploy reviewed
    migrations.

@@ -40,5 +40,16 @@ class InMemoryUserRepository(UserRepository):
 
 
 class BuildingAccessRepository:
+    def __init__(self, configuration_repository=None):
+        self.configuration_repository = configuration_repository
+
     def has_access(self, user: User, building_id: str) -> bool:
-        return user.role.value == "ADMIN" or building_id in user.building_ids
+        if user.role.value == "ADMIN" or building_id in user.building_ids:
+            return True
+        if self.configuration_repository is None:
+            return False
+        requested = self.configuration_repository.resolve_building_id(building_id)
+        if requested is None:
+            return False
+        return any(self.configuration_repository.resolve_building_id(assigned) == requested
+                   for assigned in user.building_ids)

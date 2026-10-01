@@ -14,15 +14,25 @@ class ZoneStateService:
         energy_provider: EnergyProvider,
         control_provider: BuildingControlProvider,
         data_quality_gate: DataQualityGate | None = None,
+        configuration_repository=None,
     ):
         self.occupancy_provider = occupancy_provider
         self.temperature_provider = temperature_provider
         self.energy_provider = energy_provider
         self.control_provider = control_provider
         self.data_quality_gate = data_quality_gate or DataQualityGate()
-        self._zones = self._load_zones()
+        self.configuration_repository = configuration_repository
+        self.zone_configurations = []
+        self._zones = self.refresh_configuration()
         
     def _load_zones(self):
+        if self.configuration_repository is not None:
+            configs = self.configuration_repository.runtime_zone_configs()
+            self.zone_configurations = configs
+            return {item.zone_id: Zone(zone_id=item.zone_id, name=item.name, type=item.type,
+                capacity=item.capacity, area_m2=item.area_m2,
+                comfort={"min_temperature": item.comfort["min_temperature"],
+                         "max_temperature": item.comfort["max_temperature"]}) for item in configs}
         path = resolve_project_path("data/building/zones.json")
         if not path.exists():
             return {}
@@ -30,7 +40,22 @@ class ZoneStateService:
             zones = json.load(f)
             return {z["zone_id"]: Zone(**z) for z in zones}
 
+    def refresh_configuration(self):
+        self.zone_configurations = []
+        self._zones = self._load_zones()
+        return self._zones
+
+    def resolve_zone_id(self, zone_id: str) -> str:
+        if zone_id in self._zones:
+            return zone_id
+        if self.configuration_repository is not None:
+            config = self.configuration_repository.resolve_zone(zone_id)
+            if config is not None:
+                return config.zone_id
+        raise ValueError(f"Zone {zone_id} not found")
+
     def get_zone_state(self, zone_id: str, occupancy_override=None) -> ZoneState:
+        zone_id = self.resolve_zone_id(zone_id)
         zone = self._zones.get(zone_id)
         if not zone:
             raise ValueError(f"Zone {zone_id} not found")

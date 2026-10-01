@@ -81,8 +81,8 @@ class ZoneMonitoringScheduler:
 
         self.scene_detector = SceneChangeDetector(threshold=_threshold_env("SCENE_CHANGE_THRESHOLD", 50.0))
 
-        # Initially support specific zones
-        self.monitored_zones = ["classroom_01", "classroom_02", "lab_01", "lab_02"]
+        # Runtime monitoring follows persisted active zone configuration.
+        self.monitored_zones = list(state_service._zones)
         
         self.zone_states: Dict[str, Dict[str, Any]] = {
             z: {
@@ -96,6 +96,7 @@ class ZoneMonitoringScheduler:
 
         self._task: Optional[asyncio.Task] = None
         self._running = False
+        self.scope_owner_id: str | None = None
         self.demo_mode = False
         self.demo_current_states: dict[str, Any] = {}
         self.demo_control_activity: dict[str, dict] = {}
@@ -143,12 +144,21 @@ class ZoneMonitoringScheduler:
         return {
             "running": self._running,
             "zones_enabled": len(self.monitored_zones),
-            "zones_total": 10, # hardcoded per requirements
+            "zones_total": len(self.state_service._zones),
             "camera_provider": self.camera_provider,
             "demo_simulation": self.demo_mode,
             "snapshot_interval_seconds": self.snapshot_interval,
             "zones": zones_info
         }
+
+    def configure_zones(self, zone_ids):
+        """Set the runtime scope from active persisted zones, preserving status for retained IDs."""
+        values = list(dict.fromkeys(zone_ids))
+        self.monitored_zones = values
+        self.zone_states = {zone_id: self.zone_states.get(zone_id, {
+            "last_snapshot": None, "last_inference": None, "last_frame": None,
+            "last_people_count": 0, "status": "IDLE",
+        }) for zone_id in values}
 
     async def _monitoring_loop(self):
         index = 0
@@ -160,6 +170,7 @@ class ZoneMonitoringScheduler:
                 await asyncio.sleep(self.snapshot_interval)
                 continue
 
+            index %= len(self.monitored_zones)
             zone_id = self.monitored_zones[index]
             index = (index + 1) % len(self.monitored_zones)
 

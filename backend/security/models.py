@@ -11,6 +11,7 @@ class User:
     role: Role
     active: bool = True
     building_ids: frozenset[str] = frozenset()
+    organization_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)

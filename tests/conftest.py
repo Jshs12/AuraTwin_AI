@@ -8,6 +8,8 @@ import pytest
 os.environ["COMMAND_LIMIT_MIN_SETPOINT"] = "16"
 os.environ["COMMAND_LIMIT_MAX_SETPOINT"] = "30"
 os.environ["COMMAND_LIMIT_MAX_DELTA"] = "2"
+# Keep application-level persistence isolated from the developer's local DB.
+os.environ["DATABASE_URL"] = "sqlite+pysqlite:///:memory:"
 
 
 @pytest.fixture(autouse=True)

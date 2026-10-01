@@ -58,12 +58,17 @@ class UserRecord(TimestampMixin, Base):
 
 class BuildingRecord(TimestampMixin, Base):
     __tablename__ = "buildings"
-    __table_args__ = (UniqueConstraint("organization_id", "slug", name="uq_buildings_org_slug"),)
+    __table_args__ = (
+        UniqueConstraint("organization_id", "slug", name="uq_buildings_org_slug"),
+        UniqueConstraint("building_key", name="uq_buildings_building_key"),
+    )
 
     building_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     organization_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("organizations.organization_id", ondelete="RESTRICT"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     slug: Mapped[str] = mapped_column(String(100), nullable=False)
+    building_key: Mapped[str] = mapped_column(String(160), nullable=False,
+        default=lambda context: context.get_current_parameters().get("slug", "building"))
     timezone: Mapped[str] = mapped_column(String(100), nullable=False, default="UTC", server_default="UTC")
     address: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -119,6 +124,7 @@ class ZoneRecord(TimestampMixin, Base):
     __tablename__ = "zones"
     __table_args__ = (
         UniqueConstraint("floor_id", "zone_key", name="uq_zones_floor_key"),
+        UniqueConstraint("legacy_zone_id", name="uq_zones_legacy_id"),
         CheckConstraint("capacity >= 0", name="ck_zones_capacity_nonnegative"),
         CheckConstraint("area_m2 >= 0", name="ck_zones_area_nonnegative"),
         CheckConstraint("comfort_min_c < comfort_max_c", name="ck_zones_comfort_order"),
@@ -127,6 +133,7 @@ class ZoneRecord(TimestampMixin, Base):
     zone_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     floor_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("floors.floor_id", ondelete="CASCADE"), nullable=False, index=True)
     zone_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    legacy_zone_id: Mapped[str | None] = mapped_column(String(100))
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     zone_type: Mapped[str] = mapped_column(String(80), nullable=False)
     capacity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")

@@ -6,7 +6,6 @@ from backend.core.mock_providers import MockEnergyStreamProvider
 from backend.core.events import EventBroadcaster
 from backend.security.dependencies import get_current_user, require_permission, require_any_permission
 from backend.security.roles import Permission, Role, has_permission
-from backend.security.repository import DEVELOPMENT_BUILDING_ID
 
 router = APIRouter(tags=["Monitoring"])
 
@@ -17,13 +16,25 @@ def get_energy_stream(request: Request) -> MockEnergyStreamProvider:
     return request.app.state.energy_stream_provider
 
 @router.get("/status")
-def get_monitoring_status(request: Request, _user=Depends(require_any_permission(Permission.SYSTEM_READ, Permission.BUILDING_READ))) -> dict:
-    status = get_scheduler(request).get_status()
+def get_monitoring_status(request: Request, user=Depends(require_any_permission(Permission.SYSTEM_READ, Permission.BUILDING_READ))) -> dict:
+    scheduler = get_scheduler(request)
+    status = scheduler.get_status()
+    allowed_zone_ids = {zone.zone_id for zone in request.app.state.configuration_repository.zones_for_user(user)}
+    if user.role == Role.OPERATOR and not allowed_zone_ids:
+        raise HTTPException(status_code=403, detail="Building access denied")
+    status["zones"] = [zone for zone in status["zones"] if zone["zone_id"] in allowed_zone_ids]
+    if user.role == Role.OPERATOR:
+        status["running"] = bool(status["running"] and any(
+            zone_id in allowed_zone_ids for zone_id in scheduler.monitored_zones))
+        status["zones_enabled"] = len([zone for zone in scheduler.monitored_zones if zone in allowed_zone_ids])
+        status["zones_total"] = len(allowed_zone_ids)
     status["occupancy_provider"] = getattr(request.app.state, "occupancy_provider_mode", "unknown")
     status["occupancy_provider_ready"] = getattr(request.app.state, "occupancy_provider_ready", False)
     scenario = getattr(request.app.state, "demo_scenario", None)
-    status["demo_simulation"] = bool(scenario and scenario.scenario_id)
-    status["demo_phase"] = scenario.status_payload()["current_phase"] if scenario else None
+    demo_zone_ids = set(getattr(scenario, "ZONES", ()))
+    demo_visible = user.role == Role.ADMIN or demo_zone_ids.issubset(allowed_zone_ids)
+    status["demo_simulation"] = bool(demo_visible and scenario and scenario.scenario_id)
+    status["demo_phase"] = scenario.status_payload()["current_phase"] if scenario and demo_visible else None
     if status["demo_simulation"]:
         for zone in status["zones"]:
             zone["occupancy_source"] = "DEMO"
@@ -37,10 +48,16 @@ def get_monitoring_status(request: Request, _user=Depends(require_any_permission
 @router.post("/start")
 async def start_monitoring(request: Request, user=Depends(require_permission(Permission.MONITORING_MANAGE))) -> dict:
     scheduler = get_scheduler(request)
+    if scheduler._running and scheduler.scope_owner_id not in (None, user.user_id):
+        raise HTTPException(status_code=409, detail="Monitoring is active in another authorized building scope.")
+    zone_ids = [zone.zone_id for zone in request.app.state.configuration_repository.zones_for_user(user)]
+    if not zone_ids:
+        raise HTTPException(status_code=409, detail="No active zones are configured for an assigned building.")
     scenario = getattr(request.app.state, "demo_scenario", None)
     if scenario and scenario.status.value in {"RUNNING", "PAUSED"}:
         raise HTTPException(status_code=409, detail="Use Demo Mode controls while the scenario is active.")
     await scheduler.stop_and_wait()
+    scheduler.configure_zones(zone_ids)
     if scenario and scenario.scenario_id:
         await scenario.reset()
         scheduler.demo_mode = False
@@ -51,6 +68,7 @@ async def start_monitoring(request: Request, user=Depends(require_permission(Per
         if provider is not None and hasattr(provider, "reset_simulation"):
             provider.reset_simulation()
     scheduler.start()
+    scheduler.scope_owner_id = user.user_id
     get_energy_stream(request).start()
     request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
         action="monitoring_start", resource="monitoring", success=True)
@@ -59,11 +77,14 @@ async def start_monitoring(request: Request, user=Depends(require_permission(Per
 @router.post("/stop")
 async def stop_monitoring(request: Request, user=Depends(require_permission(Permission.MONITORING_MANAGE))) -> dict:
     scheduler = get_scheduler(request)
+    if scheduler._running and scheduler.scope_owner_id not in (None, user.user_id):
+        raise HTTPException(status_code=403, detail="Monitoring is active in another authorized building scope.")
     scenario = getattr(request.app.state, "demo_scenario", None)
     if scenario and scenario.status.value in {"RUNNING", "PAUSED"}:
         await scenario.stop()
         scheduler.demo_mode = False
     await scheduler.stop_and_wait()
+    scheduler.scope_owner_id = None
     await get_energy_stream(request).stop_and_wait()
     request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
         action="monitoring_stop", resource="monitoring", success=True)
@@ -85,7 +106,8 @@ async def websocket_events(websocket: WebSocket):
         if not has_permission(user.role, required):
             await websocket.close(code=4403)
             return
-        if user.role.value == "OPERATOR" and DEVELOPMENT_BUILDING_ID not in user.building_ids:
+        allowed_zone_ids = {zone.zone_id for zone in websocket.app.state.configuration_repository.zones_for_user(user)}
+        if user.role == Role.OPERATOR and not allowed_zone_ids:
             await websocket.close(code=4403)
             return
     except Exception:
@@ -94,7 +116,15 @@ async def websocket_events(websocket: WebSocket):
     await websocket.accept()
     
     async def send_message(message: str):
-        await websocket.send_text(message)
+        import json
+        try:
+            event = json.loads(message)
+            # Building-wide/unknown events are never exposed to scoped operators.
+            if user.role == Role.OPERATOR and event.get("zone_id") not in allowed_zone_ids:
+                return
+            await websocket.send_text(message)
+        except Exception:
+            return
         
     EventBroadcaster.subscribe(send_message)
     try:

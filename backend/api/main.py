@@ -60,12 +60,24 @@ from fastapi.responses import JSONResponse
 from backend.security.service import AuthService
 from backend.security.audit import AuditService
 from backend.security.roles import Permission, Role
-from backend.security.repository import BuildingAccessRepository, DEVELOPMENT_BUILDING_ID
+from backend.security.repository import BuildingAccessRepository
 from backend.security.schemas import LoginRequest, OperatorCreateRequest, TokenResponse, UserResponse, LogoutResponse
 from backend.security.models import User
 from backend.security.passwords import hash_password
 from backend.security.dependencies import get_current_user, require_permission, require_any_permission, require_zone_permission, require_zone_any_permission
 from backend.security.jwt import token_settings
+from backend.database.config import DatabaseSettings
+from backend.database.runtime import initialize_local_demo_database
+from backend.database.repositories import SQLAlchemyUserRepository, SQLAlchemyOrganizationRepository
+from backend.database.configuration import SQLAlchemyConfigurationRepository
+from backend.api.configuration import router as configuration_router
+
+# Configuration/auth records are persistent. Live ZoneState, telemetry and events
+# remain runtime-only. SQLite is the local development default; Postgres requires
+# an explicit migration before this application can use it.
+database_engine, database_sessions = initialize_local_demo_database(DatabaseSettings.from_environment())
+configuration_repository = SQLAlchemyConfigurationRepository(database_sessions)
+organization_repository = SQLAlchemyOrganizationRepository(database_sessions)
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
@@ -89,13 +101,16 @@ async def lifespan(application: FastAPI):
             await scenario.reset()
         if pending_tasks:
             await asyncio.gather(*pending_tasks, return_exceptions=True)
+        database_engine.dispose()
 
 
 app = FastAPI(title="AuraTwin AI V2 API", lifespan=lifespan)
 
-app.state.auth_service = AuthService()
+app.state.auth_service = AuthService(SQLAlchemyUserRepository(database_sessions))
 app.state.audit_service = AuditService()
-app.state.building_access = BuildingAccessRepository()
+app.state.configuration_repository = configuration_repository
+app.state.organization_repository = organization_repository
+app.state.building_access = BuildingAccessRepository(configuration_repository)
 
 def _cors_origins() -> list[str]:
     configured = os.getenv("AURATWIN_CORS_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173")
@@ -126,8 +141,14 @@ class AuthenticatedDetectionFiles(StaticFiles):
             user = app.state.auth_service.users.get_by_id(claims["sub"])
             if user is None or not user.active or user.role.value != claims["role"]:
                 raise ValueError("invalid user")
-            if user.role == Role.OPERATOR and DEVELOPMENT_BUILDING_ID not in user.building_ids:
-                raise HTTPException(403, "Building access denied")
+            if user.role == Role.OPERATOR:
+                filename = Path(path).name
+                if filename != path:
+                    raise HTTPException(404, "Detection file not found")
+                candidates = [zone for zone in app.state.configuration_repository.zones_for_user(user)
+                              if filename.startswith(zone.zone_id + "_")]
+                if not candidates:
+                    raise HTTPException(403, "Building access denied")
         except HTTPException as exc:
             return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
         except Exception:
@@ -145,11 +166,7 @@ OCCUPANCY_PROVIDER_MODE = os.environ.get("OCCUPANCY_PROVIDER", "mock").lower()
 tariff_prov = MockTariffProvider()
 temp_prov = MockTemperatureProvider()
 energy_prov = MockEnergyProvider(tariff_prov)
-_zone_config_path = resolve_project_path("data/building/zones.json")
-_configured_zone_ids = []
-if _zone_config_path.exists():
-    with open(_zone_config_path, "r", encoding="utf-8") as _zone_file:
-        _configured_zone_ids = [entry["zone_id"] for entry in json.load(_zone_file)]
+_configured_zone_ids = [item.zone_id for item in configuration_repository.runtime_zone_configs()]
 CONTROL_PROVIDER_MODE = os.environ.get("BUILDING_CONTROL_PROVIDER", "simulated_bacnet").strip().lower()
 if CONTROL_PROVIDER_MODE not in {"simulated_bacnet", "mock"}:
     print("[WARNING] Unsupported BUILDING_CONTROL_PROVIDER; using simulated_bacnet.")
@@ -183,7 +200,8 @@ app.state.occupancy_provider_ready = (
 )
 
 # Instantiate services
-zone_state_service = ZoneStateService(occ_prov, temp_prov, energy_prov, control_prov)
+zone_state_service = ZoneStateService(occ_prov, temp_prov, energy_prov, control_prov,
+                                      configuration_repository=configuration_repository)
 control_service = ControlService(control_prov, state_provider=zone_state_service.get_zone_state,
                                  control_states=ZoneControlStateService(initially_enabled=False))
 optimizer = OptimizationEngine()
@@ -193,8 +211,20 @@ app.state.energy_stream_provider = MockEnergyStreamProvider(tariff_prov, EventBr
 # Pass occ_prov (which has detect_from_image now)
 app.state.monitoring_scheduler = ZoneMonitoringScheduler(zone_state_service, recommendation_workflow, control_service, occ_prov)
 app.state.demo_scenario = DemoScenarioEngine()
+app.state.zone_state_service = zone_state_service
 
 app.include_router(monitoring.router, prefix="/api/monitoring")
+app.include_router(configuration_router, prefix="/api")
+
+
+def _public_user(request: Request, user: User):
+    payload = request.app.state.auth_service.safe_user(user)
+    public_building_ids = []
+    for identifier in user.building_ids:
+        building = request.app.state.configuration_repository.get_building(identifier)
+        public_building_ids.append(building["building_key"] if building else identifier)
+    payload["building_ids"] = sorted(public_building_ids)
+    return payload
 
 
 @app.post("/api/auth/login", response_model=TokenResponse)
@@ -207,7 +237,7 @@ async def login(body: LoginRequest, request: Request):
     request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
         action="login_succeeded", resource="auth", success=True)
     return {"access_token": token, "expires_in": expires,
-            "user": request.app.state.auth_service.safe_user(user)}
+            "user": _public_user(request, user)}
 
 
 @app.post("/api/auth/logout", response_model=LogoutResponse)
@@ -217,30 +247,47 @@ async def logout(user=Depends(get_current_user)):
 
 @app.get("/api/auth/me", response_model=UserResponse)
 async def auth_me(request: Request, user=Depends(get_current_user)):
-    return request.app.state.auth_service.safe_user(user)
+    return _public_user(request, user)
 
 
 @app.get("/api/auth/access")
 async def auth_access(request: Request, user=Depends(require_any_permission(Permission.ACCESS_READ, Permission.ACCESS_MANAGE))):
     users = request.app.state.auth_service.users.list_users()
-    return {"users": [{**request.app.state.auth_service.safe_user(item), "active": item.active}
+    if user.role == Role.OPERATOR:
+        assigned = set(user.building_ids)
+        users = [item for item in users if item.role == Role.OPERATOR and assigned.intersection(item.building_ids)]
+    return {"users": [{**_public_user(request, item), "active": item.active}
                        for item in users]}
 
 
 @app.post("/api/auth/operators", status_code=201)
 async def create_operator(body: OperatorCreateRequest, request: Request,
                           user=Depends(require_permission(Permission.ACCESS_MANAGE))):
-    building_ids = {DEVELOPMENT_BUILDING_ID}
+    building_ids = set(body.building_ids or user.building_ids)
+    if not building_ids:
+        raise HTTPException(422, "Assign at least one building to the operator")
+    for building_id in building_ids:
+        try:
+            from backend.security.dependencies import require_building_access
+            require_building_access(building_id, user, request)
+        except HTTPException:
+            raise HTTPException(403, "Cannot assign an operator to a building outside your access") from None
     created = User(str(uuid.uuid4()), body.email, hash_password(body.password), Role.OPERATOR,
                    True, frozenset(building_ids))
     try:
         request.app.state.auth_service.users.add(created)
     except ValueError:
         raise HTTPException(409, "Account already exists") from None
+    except Exception as exc:
+        from sqlalchemy.exc import IntegrityError
+        if isinstance(exc, IntegrityError):
+            raise HTTPException(409, "Account already exists") from None
+        raise
     request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
         action="operator_created", resource="user", resource_id=created.user_id,
-        building_id=DEVELOPMENT_BUILDING_ID, success=True)
-    return request.app.state.auth_service.safe_user(created)
+        building_id=next(iter(building_ids)), success=True,
+        metadata={"building_ids": sorted(building_ids)})
+    return _public_user(request, created)
 
 
 @app.delete("/api/auth/operators/{user_id}")
@@ -249,10 +296,12 @@ async def revoke_operator(user_id: str, request: Request,
     target = request.app.state.auth_service.users.get_by_id(user_id)
     if target is None or target.role != Role.OPERATOR:
         raise HTTPException(404, "Operator not found")
+    if user.role == Role.OPERATOR and not set(user.building_ids).intersection(target.building_ids):
+        raise HTTPException(404, "Operator not found")
     revoked = request.app.state.auth_service.users.deactivate(user_id)
     request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
         action="operator_access_revoked", resource="user", resource_id=user_id,
-        building_id=DEVELOPMENT_BUILDING_ID, success=True)
+        building_id=next(iter(target.building_ids), None), success=True)
     return {"user_id": revoked.user_id, "active": revoked.active}
 
 
@@ -269,19 +318,19 @@ async def get_audit_records(request: Request, _user=Depends(require_permission(P
 # Helpers
 # ---------------------------------------------------------------------------
 def load_zones():
-    path = resolve_project_path("data/building/zones.json")
-    if not path.exists():
-        return []
-    with open(path, "r") as f:
-        return json.load(f)
+    return [zone.api_dict() for zone in configuration_repository.runtime_zone_configs()]
+
+
+def _zone_building_id(zone_id: str) -> str:
+    zone = configuration_repository.resolve_zone(zone_id)
+    return zone.building_id if zone else ""
 
 
 def get_zone_capacity(zone_id: str) -> int:
-    """Look up a zone's capacity from zones.json."""
-    for z in load_zones():
-        if z["zone_id"] == zone_id:
-            return z.get("capacity", 1)
-    raise HTTPException(status_code=404, detail=f"Zone {zone_id} not found")
+    config = configuration_repository.resolve_zone(zone_id)
+    if config is None:
+        raise HTTPException(status_code=404, detail=f"Zone {zone_id} not found")
+    return config.capacity
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +342,8 @@ async def health_check():
 
 
 @app.get("/api/demo/status")
-async def get_demo_status(_user=Depends(require_any_permission(Permission.SYSTEM_READ, Permission.BUILDING_READ))):
+async def get_demo_status(request: Request, _user=Depends(require_any_permission(Permission.SYSTEM_READ, Permission.BUILDING_READ))):
+    _require_demo_scope(_user, request)
     return app.state.demo_scenario.status_payload()
 
 
@@ -302,10 +352,23 @@ def _demo_capacities():
             for zone_id in app.state.demo_scenario.ZONES if zone_id in zone_state_service._zones}
 
 
+def _require_demo_scope(user, request: Request):
+    if user.role == Role.ADMIN:
+        return
+    application = getattr(request, "app", request)
+    allowed = {zone.zone_id for zone in application.state.configuration_repository.zones_for_user(user)}
+    if not set(application.state.demo_scenario.ZONES).issubset(allowed):
+        raise HTTPException(status_code=403, detail="Demo scenario is outside the assigned building scope.")
+
+
 @app.post("/api/demo/start")
 async def start_demo(user=Depends(require_permission(Permission.MONITORING_MANAGE))):
     try:
         scheduler = app.state.monitoring_scheduler
+        demo_zone_ids = list(app.state.demo_scenario.ZONES)
+        _require_demo_scope(user, app)
+        if scheduler._running and scheduler.scope_owner_id not in (None, user.user_id):
+            raise HTTPException(status_code=409, detail="Monitoring is active in another authorized building scope.")
         scenario_status = app.state.demo_scenario.status.value
         if scenario_status in {"RUNNING", "PAUSED"}:
             detail = ("Demo scenario is already running." if scenario_status == "RUNNING"
@@ -323,13 +386,17 @@ async def start_demo(user=Depends(require_permission(Permission.MONITORING_MANAG
                 zone.update({"last_snapshot": None, "last_inference": None, "last_frame": None,
                              "last_people_count": 0, "status": "IDLE"})
         await scheduler.stop_and_wait()
+        scheduler.configure_zones(demo_zone_ids)
         scheduler.demo_mode = True
+        scheduler.scope_owner_id = user.user_id
         scheduler.start()
         await app.state.energy_stream_provider.stop_and_wait()
 
         async def on_demo_complete():
             scheduler.demo_mode = False
             await scheduler.stop_and_wait()
+            scheduler.scope_owner_id = None
+            scheduler.configure_zones(zone.zone_id for zone in configuration_repository.zones_for_user(user))
 
         result = await app.state.demo_scenario.start(
             scheduler.process_simulated_occupancy,
@@ -345,7 +412,8 @@ async def start_demo(user=Depends(require_permission(Permission.MONITORING_MANAG
 
 
 @app.post("/api/demo/pause")
-async def pause_demo(user=Depends(require_permission(Permission.MONITORING_MANAGE))):
+async def pause_demo(request: Request, user=Depends(require_permission(Permission.MONITORING_MANAGE))):
+    _require_demo_scope(user, request)
     try:
         result = await app.state.demo_scenario.pause()
         app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
@@ -356,7 +424,8 @@ async def pause_demo(user=Depends(require_permission(Permission.MONITORING_MANAG
 
 
 @app.post("/api/demo/resume")
-async def resume_demo(user=Depends(require_permission(Permission.MONITORING_MANAGE))):
+async def resume_demo(request: Request, user=Depends(require_permission(Permission.MONITORING_MANAGE))):
+    _require_demo_scope(user, request)
     try:
         result = await app.state.demo_scenario.resume()
         app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
@@ -367,11 +436,15 @@ async def resume_demo(user=Depends(require_permission(Permission.MONITORING_MANA
 
 
 @app.post("/api/demo/stop")
-async def stop_demo(user=Depends(require_permission(Permission.MONITORING_MANAGE))):
+async def stop_demo(request: Request, user=Depends(require_permission(Permission.MONITORING_MANAGE))):
+    _require_demo_scope(user, request)
     try:
         result = await app.state.demo_scenario.stop()
         app.state.monitoring_scheduler.demo_mode = False
         await app.state.monitoring_scheduler.stop_and_wait()
+        app.state.monitoring_scheduler.scope_owner_id = None
+        app.state.monitoring_scheduler.configure_zones(
+            zone.zone_id for zone in configuration_repository.zones_for_user(user))
         app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
             action="demo_stop", resource="demo", success=True, metadata={"simulation": True})
         return result
@@ -380,10 +453,12 @@ async def stop_demo(user=Depends(require_permission(Permission.MONITORING_MANAGE
 
 
 @app.post("/api/demo/reset")
-async def reset_demo(user=Depends(require_permission(Permission.MONITORING_MANAGE))):
+async def reset_demo(request: Request, user=Depends(require_permission(Permission.MONITORING_MANAGE))):
+    _require_demo_scope(user, request)
     result = await app.state.demo_scenario.reset()
     app.state.monitoring_scheduler.demo_mode = False
     await app.state.monitoring_scheduler.stop_and_wait()
+    app.state.monitoring_scheduler.scope_owner_id = None
     await app.state.energy_stream_provider.stop_and_wait()
     if hasattr(control_prov, "reset_simulation"):
         control_prov.reset_simulation()
@@ -400,7 +475,8 @@ async def reset_demo(user=Depends(require_permission(Permission.MONITORING_MANAG
 
 
 @app.post("/api/demo/speed")
-async def set_demo_speed(body: dict, user=Depends(require_permission(Permission.MONITORING_MANAGE))):
+async def set_demo_speed(body: dict, request: Request, user=Depends(require_permission(Permission.MONITORING_MANAGE))):
+    _require_demo_scope(user, request)
     try:
         return await app.state.demo_scenario.set_speed(float(body.get("speed_multiplier")))
     except (ValueError, TypeError) as exc:
@@ -408,7 +484,8 @@ async def set_demo_speed(body: dict, user=Depends(require_permission(Permission.
 
 
 @app.get("/api/demo/building-summary")
-async def get_demo_building_summary(_user=Depends(require_any_permission(Permission.ENERGY_READ, Permission.BUILDING_READ))):
+async def get_demo_building_summary(request: Request, _user=Depends(require_any_permission(Permission.ENERGY_READ, Permission.BUILDING_READ))):
+    _require_demo_scope(_user, request)
     scheduler = app.state.monitoring_scheduler
     current_states = list(scheduler.demo_current_states.values())
     occupancy = [state.occupancy.people_count for state in current_states]
@@ -422,7 +499,7 @@ async def get_demo_building_summary(_user=Depends(require_any_permission(Permiss
     return {
         "simulation": True,
         "scenario_id": scenario_id,
-        "active_zones": len(app.state.monitoring_scheduler.monitored_zones),
+        "active_zones": len(app.state.demo_scenario.ZONES),
         "occupied_zones": sum(1 for value in occupancy if value > 0),
         "total_occupants": sum(occupancy),
         "simulated_power_kw": float(latest["power_kw"]) if latest else 0.0,
@@ -441,7 +518,8 @@ async def get_demo_building_summary(_user=Depends(require_any_permission(Permiss
 
 
 @app.get("/api/demo/activity")
-async def get_demo_activity(_user=Depends(require_any_permission(Permission.EVENTS_READ, Permission.BUILDING_READ))):
+async def get_demo_activity(request: Request, _user=Depends(require_any_permission(Permission.EVENTS_READ, Permission.BUILDING_READ))):
+    _require_demo_scope(_user, request)
     scenario_id = app.state.demo_scenario.scenario_id
     activities = []
     if scenario_id:
@@ -456,7 +534,8 @@ async def get_demo_activity(_user=Depends(require_any_permission(Permission.EVEN
 
 
 @app.get("/api/demo/events")
-async def get_demo_events(_user=Depends(require_any_permission(Permission.EVENTS_READ, Permission.MONITORING_MANAGE))):
+async def get_demo_events(request: Request, _user=Depends(require_any_permission(Permission.EVENTS_READ, Permission.MONITORING_MANAGE))):
+    _require_demo_scope(_user, request)
     scenario_id = app.state.demo_scenario.scenario_id
     events = [event.model_dump(mode="json") for event in EventTrace._events
               if scenario_id and event.payload.get("scenario_id") == scenario_id]
@@ -464,16 +543,24 @@ async def get_demo_events(_user=Depends(require_any_permission(Permission.EVENTS
 
 
 @app.get("/api/zones")
-async def get_zones(_user=Depends(require_permission(Permission.ZONES_READ))):
-    return {"zones": load_zones()}
+async def get_zones(request: Request, building_id: str | None = None,
+                    _user=Depends(require_permission(Permission.ZONES_READ))):
+    if building_id:
+        from backend.security.dependencies import require_building_access
+        require_building_access(building_id, _user, request)
+        zones = configuration_repository.list_zones(building_id=building_id)
+    else:
+        zones = configuration_repository.zones_for_user(_user)
+    if _user.role == Role.OPERATOR and not zones:
+        raise HTTPException(status_code=403, detail="Building access denied")
+    return {"zones": [zone.api_dict() for zone in zones]}
 
 
 @app.get("/api/zones/{zone_id}")
 async def get_zone(zone_id: str, _user=Depends(require_zone_permission(Permission.ZONES_READ))):
-    zones = load_zones()
-    for z in zones:
-        if z["zone_id"] == zone_id:
-            return z
+    zone = configuration_repository.get_zone(zone_id)
+    if zone is not None:
+        return zone
     raise HTTPException(status_code=404, detail="Zone not found")
 
 
@@ -512,7 +599,7 @@ async def set_manual_override(zone_id: str, body: ControlModeUpdate, request: Re
     request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
         action="manual_override_enabled" if body.enabled else "manual_override_disabled",
         resource="zone_control_state", resource_id=zone_id,
-        building_id=DEVELOPMENT_BUILDING_ID, success=True,
+        building_id=_zone_building_id(zone_id), success=True,
         metadata={"enabled": body.enabled},
     )
     return state
@@ -529,7 +616,7 @@ async def set_zone_control_enabled(zone_id: str, body: ControlModeUpdate, reques
         )
         request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
             action="control_disabled", resource="zone_control_state", resource_id=zone_id,
-            building_id=DEVELOPMENT_BUILDING_ID, success=True, metadata={"enabled": False},
+            building_id=_zone_building_id(zone_id), success=True, metadata={"enabled": False},
         )
         return state
 
@@ -543,14 +630,14 @@ async def set_zone_control_enabled(zone_id: str, body: ControlModeUpdate, reques
     if failures:
         request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
             action="control_enable_rejected", resource="zone_control_state", resource_id=zone_id,
-            building_id=DEVELOPMENT_BUILDING_ID, success=False,
+            building_id=_zone_building_id(zone_id), success=False,
             metadata={"reason_code": "DATA_QUALITY_REJECTED"},
         )
         raise HTTPException(status_code=409, detail="Fresh critical zone data is required before enabling control.")
     if not control_service.safety.command_policy_ready:
         request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
             action="control_enable_rejected", resource="zone_control_state", resource_id=zone_id,
-            building_id=DEVELOPMENT_BUILDING_ID, success=False,
+            building_id=_zone_building_id(zone_id), success=False,
             metadata={"reason_code": "COMMAND_POLICY_UNAVAILABLE"},
         )
         raise HTTPException(status_code=409, detail="Configured command limits are required before enabling control.")
@@ -559,7 +646,7 @@ async def set_zone_control_enabled(zone_id: str, body: ControlModeUpdate, reques
             command_id="operator-enable", reason_code="PROVIDER_UNAVAILABLE", provider_ready=False)
         request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
             action="control_enable_rejected", resource="zone_control_state", resource_id=zone_id,
-            building_id=DEVELOPMENT_BUILDING_ID, success=False,
+            building_id=_zone_building_id(zone_id), success=False,
             metadata={"reason_code": "PROVIDER_UNAVAILABLE"},
         )
         raise HTTPException(status_code=409, detail="Control provider must be ready before enabling control.")
@@ -567,7 +654,7 @@ async def set_zone_control_enabled(zone_id: str, body: ControlModeUpdate, reques
     state = control_service.control_states.set_control_enabled(zone_id, True, user_id=user.user_id)
     request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
         action="control_enabled", resource="zone_control_state", resource_id=zone_id,
-        building_id=DEVELOPMENT_BUILDING_ID, success=True,
+        building_id=_zone_building_id(zone_id), success=True,
         metadata={"enabled": True, "fresh_state_checked": True},
     )
     return state
@@ -596,7 +683,7 @@ async def generate_recommendation(zone_id: str, _user=Depends(require_zone_permi
 async def apply_control(zone_id: str, decision: RecommendationSubmission,
                         request: Request, user=Depends(require_zone_permission(Permission.CONTROL_EXECUTE))):
     from backend.security.dependencies import zone_building_id
-    building_id = zone_building_id(zone_id)
+    building_id = zone_building_id(request, zone_id)
     audit = request.app.state.audit_service
     if decision.zone_id != zone_id:
         raise HTTPException(status_code=400, detail="Zone mismatch")
@@ -674,6 +761,7 @@ ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 @app.post("/api/occupancy/detect")
 async def detect_occupancy(
+    request: Request,
     file: UploadFile = File(...),
     zone_id: str = Form(default="classroom_01"),
     _user=Depends(require_permission(Permission.MONITORING_MANAGE)),
@@ -695,6 +783,8 @@ async def detect_occupancy(
 
     # Validate zone exists
     capacity = get_zone_capacity(zone_id)
+    from backend.security.dependencies import require_building_access
+    require_building_access(_zone_building_id(zone_id), _user, request)
 
     # Guard: if yolo mode was requested but model failed to load, report truthfully.
     if OCCUPANCY_PROVIDER_MODE == "yolo" and (yolo_provider is None or not yolo_provider.is_ready()):

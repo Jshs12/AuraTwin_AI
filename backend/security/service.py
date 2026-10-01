@@ -22,11 +22,11 @@ class AuthService:
             token_settings()  # Fail startup clearly when enabled authentication lacks a strong signing secret.
         if email and password and not self.users.get_by_email(email):
             self.users.add(User(str(uuid.uuid4()), email.strip().lower(), hash_password(password),
-                                Role.ADMIN, True, frozenset()))
+                                Role.ADMIN, True, frozenset(), frozenset()))
         if operator_email and operator_password and not self.users.get_by_email(operator_email):
             building_id = os.getenv("AURATWIN_BOOTSTRAP_OPERATOR_BUILDING_ID", DEVELOPMENT_BUILDING_ID)
             self.users.add(User(str(uuid.uuid4()), operator_email.strip().lower(), hash_password(operator_password),
-                                Role.OPERATOR, True, frozenset({building_id})))
+                                Role.OPERATOR, True, frozenset({building_id}), frozenset()))
 
     def authenticate(self, email: str, password: str):
         user = self.users.get_by_email(email.strip().lower())
@@ -37,4 +37,5 @@ class AuthService:
     @staticmethod
     def safe_user(user: User):
         return {"user_id": user.user_id, "email": user.email, "role": user.role,
-                "active": user.active, "building_ids": sorted(user.building_ids)}
+                "active": user.active, "building_ids": sorted(user.building_ids),
+                "organization_ids": sorted(user.organization_ids)}

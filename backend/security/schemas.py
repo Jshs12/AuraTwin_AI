@@ -17,6 +17,7 @@ class LoginRequest(BaseModel):
 
 class OperatorCreateRequest(LoginRequest):
     password: str = Field(min_length=12, max_length=1024)
+    building_ids: list[str] = Field(default_factory=list, max_length=100)
 
 
 class UserResponse(BaseModel):
@@ -25,6 +26,7 @@ class UserResponse(BaseModel):
     role: Role
     active: bool
     building_ids: list[str]
+    organization_ids: list[str] = Field(default_factory=list)
 
 
 class TokenResponse(BaseModel):

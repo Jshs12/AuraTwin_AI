@@ -15,6 +15,9 @@ frontend/coverage/
 data/ultralytics/
 data/detections/
 data/backend-demo.*.log
+data/auratwin.db
+data/auratwin.db-shm
+data/auratwin.db-wal
 
 # Python
 __pycache__/

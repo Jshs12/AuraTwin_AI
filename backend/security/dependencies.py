@@ -4,7 +4,7 @@ from jwt import InvalidTokenError
 from .models import User
 from .roles import Permission, Role, has_permission
 from .jwt import decode_access_token
-from .repository import BuildingAccessRepository, DEVELOPMENT_BUILDING_ID
+from .repository import BuildingAccessRepository
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -24,8 +24,6 @@ def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials
 def require_permission(permission: Permission):
     def dependency(user: User = Depends(get_current_user)):
         if not has_permission(user.role, permission): raise HTTPException(403, "Insufficient permission")
-        if user.role == Role.OPERATOR and DEVELOPMENT_BUILDING_ID not in user.building_ids:
-            raise HTTPException(403, "Building access denied")
         return user
     return dependency
 
@@ -34,8 +32,6 @@ def require_any_permission(*permissions: Permission):
     def dependency(user: User = Depends(get_current_user)):
         if not any(has_permission(user.role, permission) for permission in permissions):
             raise HTTPException(403, "Insufficient permission")
-        if user.role == Role.OPERATOR and DEVELOPMENT_BUILDING_ID not in user.building_ids:
-            raise HTTPException(403, "Building access denied")
         return user
     return dependency
 
@@ -52,13 +48,24 @@ def require_building_access(building_id: str, user: User, request: Request):
     if not access.has_access(user, building_id): raise HTTPException(403, "Building access denied")
 
 
-def zone_building_id(zone_id: str) -> str:
-    # Current data has one simulated building; Phase 11 replaces this resolver with repository-backed ownership.
-    return DEVELOPMENT_BUILDING_ID
+def require_organization_access(request: Request, user: User, organization_id: str):
+    repository = request.app.state.configuration_repository
+    if not repository.user_has_organization(user, organization_id):
+        raise HTTPException(403, "Organization access denied")
+
+
+def zone_building_id(request: Request, zone_id: str) -> str:
+    try:
+        zone = request.app.state.configuration_repository.resolve_zone(zone_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    if zone is None:
+        raise HTTPException(404, "Zone not found")
+    return zone.building_id
 
 
 def require_zone_access(request: Request, user: User, zone_id: str):
-    require_building_access(zone_building_id(zone_id), user, request)
+    require_building_access(zone_building_id(request, zone_id), user, request)
 
 
 def require_zone_permission(permission: Permission):

@@ -16,7 +16,7 @@ export function AccessPanel({ role }: { role: "ADMIN" | "OPERATOR" }) {
     const values = new FormData(event.currentTarget);
     try {
       await api.createOperator(String(values.get("email")), String(values.get("password")));
-      form.reset(); setNotice("Operator added to development-building."); reload();
+      form.reset(); setNotice("Operator added to your assigned buildings."); reload();
     } catch (err) { setError(err instanceof Error ? err.message : "Unable to create operator"); }
   }
   async function revoke(userId: string) {
@@ -26,7 +26,7 @@ export function AccessPanel({ role }: { role: "ADMIN" | "OPERATOR" }) {
   }
   return <section className="card">
     <h2 className="card-title">BUILDING ACCESS</h2>
-    <p className="security-note">Current local scope: development-building. Account storage is in memory.</p>
+    <p className="security-note">Operators can manage access only within buildings assigned to their account. Account and building assignments are stored in the local configuration database.</p>
     {error && <p className="demo-error" role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}
     {role === "OPERATOR" && <form className="access-form" onSubmit={create}>
       <label>Email<input name="email" type="email" autoComplete="off" required /></label>

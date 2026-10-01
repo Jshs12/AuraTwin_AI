@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useZones } from "../hooks/useZones";
 import { useMonitoring } from "../hooks/useMonitoring";
 import { TopNav } from "../components/layout/TopNav";
@@ -14,6 +14,7 @@ import type { DemoBuildingSummary } from "../types/api";
 import { formatISTTimestamp } from "../utils/time";
 import { AccessPanel } from "../components/security/AccessPanel";
 import { AuditPanel } from "../components/security/AuditPanel";
+import { api } from "../services/api";
 
 type Section = "Overview" | "Zones" | "Occupancy" | "Energy" | "Events" | "Access" | "Audit";
 
@@ -21,12 +22,22 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
   const [activeSection, setActiveSection] = useState<Section>("Overview");
   const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
   const [demoSummary, setDemoSummary] = useState<DemoBuildingSummary | null>(null);
+  const [buildings, setBuildings] = useState<Array<{ building_id: string; building_key: string; name: string }>>([]);
+  const [selectedBuildingId, setSelectedBuildingId] = useState<string | undefined>();
+
+  useEffect(() => {
+    api.getBuildings().then(items => {
+      setBuildings(items);
+      setSelectedBuildingId(current => current && items.some(item => item.building_id === current)
+        ? current : items[0]?.building_id);
+    }).catch(() => setBuildings([]));
+  }, []);
 
   // Centralized state from WebSocket + monitoring API
   const monitoring = useMonitoring();
 
-  // Zone list (static zones.json)
-  const { zones, loading: zonesLoading, error: zonesError } = useZones();
+  // Zone configuration is persistent and scoped to the selected authorized building.
+  const { zones, loading: zonesLoading, error: zonesError } = useZones(selectedBuildingId);
   const updateDemoSummary = useCallback((summary: DemoBuildingSummary) => setDemoSummary(summary), []);
   const energyHistory = demoSummary?.scenario_id
     ? demoSummary.energy_history.map(sample => ({
@@ -51,6 +62,15 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
       />
 
       <main className="main-content">
+        {buildings.length > 1 && <label className="building-selector">
+          Building
+          <select value={selectedBuildingId} onChange={event => {
+            setSelectedBuildingId(event.target.value);
+            setSelectedZoneId(null);
+          }}>
+            {buildings.map(building => <option key={building.building_id} value={building.building_id}>{building.name}</option>)}
+          </select>
+        </label>}
         {/* ── OVERVIEW ─────────────────────────────────────────── */}
         {activeSection === "Overview" && (
           <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
@@ -122,7 +142,7 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
               <div style={{ fontSize: "0.8rem", color: "var(--text-muted)", marginBottom: "1rem" }}>
                 Upload an image manually to test YOLO inference. This is independent of autonomous monitoring.
               </div>
-              {role === "OPERATOR" && <CVPanel zoneId="classroom_01" />}
+              {role === "OPERATOR" && zones.length > 0 && <CVPanel zoneId={selectedZoneId ?? zones[0].zone_id} />}
             </div>
           </div>
         )}

@@ -74,8 +74,14 @@ export const api = {
     if (!res.ok) throw new Error("Unable to load audit records");
     return (await res.json()).records as Array<{ timestamp: string; user_id: string | null; role: string | null; action: string; resource: string; resource_id: string | null; building_id: string | null; success: boolean; metadata: Record<string, unknown> }>;
   },
-  async getZones(): Promise<Zone[]> {
-    const res = await authFetch(`${API_BASE}/zones`);
+  async getBuildings(): Promise<Array<{ building_id: string; building_key: string; organization_id: string; name: string }>> {
+    const res = await authFetch(`${API_BASE}/buildings`);
+    if (!res.ok) throw new Error("Unable to fetch authorized buildings");
+    return (await res.json()).buildings;
+  },
+  async getZones(buildingId?: string): Promise<Zone[]> {
+    const query = buildingId ? `?building_id=${encodeURIComponent(buildingId)}` : "";
+    const res = await authFetch(`${API_BASE}/zones${query}`);
     if (!res.ok) throw new Error("Failed to fetch zones");
     const data = await res.json();
     return data.zones;
