@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type { ZoneState, SystemEvent, RecommendationDecision, ControlResult } from "../types/api";
-import { api } from "../services/api";
+import { api, authSession, ApiRequestError } from "../services/api";
 
 export function useZoneState(zoneId: string | null) {
   const [state, setState] = useState<ZoneState | null>(null);
@@ -10,6 +10,7 @@ export function useZoneState(zoneId: string | null) {
   
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const pollBlockedRef = useRef(false);
 
   const fetchZoneData = useCallback(async () => {
     if (!zoneId) {
@@ -24,10 +25,9 @@ export function useZoneState(zoneId: string | null) {
       setLoading(true);
       setError(null);
       
-      const [stateData, historyData] = await Promise.all([
-        api.getZoneState(zoneId),
-        api.getZoneHistory(zoneId).catch(() => []) // Optional fallback
-      ]);
+      const stateData = await api.getZoneState(zoneId);
+      if (!authSession.getToken()) return;
+      const historyData = await api.getZoneHistory(zoneId);
       
       setState(stateData);
       setHistory(historyData);
@@ -45,8 +45,13 @@ export function useZoneState(zoneId: string | null) {
 
   useEffect(() => {
     if (!zoneId) return;
+    pollBlockedRef.current = false;
     const poll = window.setInterval(() => {
-      api.getZoneState(zoneId).then(setState).catch(() => undefined);
+      if (!authSession.getToken() || pollBlockedRef.current) return;
+      api.getZoneState(zoneId).then(data => { setState(data); setError(null); }).catch(err => {
+        if (err instanceof ApiRequestError && (err.status === 401 || err.status === 403)) pollBlockedRef.current = true;
+        setError(err instanceof Error ? err.message : "Unable to refresh zone state.");
+      });
     }, 2000);
     return () => window.clearInterval(poll);
   }, [zoneId]);

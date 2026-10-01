@@ -16,7 +16,7 @@ export function useOccupancy() {
         const data = await api.getOccupancyStatus();
         setStatus(data);
       } catch (err: any) {
-        console.error("Failed to load occupancy status", err);
+        setError(err instanceof Error ? err.message : "Occupancy status request failed.");
       } finally {
         setLoading(false);
       }

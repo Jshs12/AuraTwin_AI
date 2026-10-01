@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { MonitoringStatus, SystemEvent } from "../types/api";
-import { api, authSession } from "../services/api";
+import { api, authSession, ApiRequestError } from "../services/api";
 import { formatISTTimestamp } from "../utils/time";
 
 const WS_BASE = `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:8000`;
@@ -43,10 +43,20 @@ export function useMonitoring() {
   const connectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttempt = useRef(0);
   const mountedRef = useRef(true);
+  const fetchInFlightRef = useRef(false);
+  const fetchBlockedRef = useRef(false);
 
   const fetchStatus = useCallback(async () => {
+    if (!authSession.getToken() || fetchInFlightRef.current || fetchBlockedRef.current) return;
+    fetchInFlightRef.current = true;
     try {
-      const [s, demoEvents, demoSummary] = await Promise.all([api.getMonitoringStatus(), api.getDemoEvents(), api.getDemoBuildingSummary()]);
+      // Read sequentially so the first 401 terminates this refresh cycle before
+      // it fans out into multiple known-protected requests with the same token.
+      const s = await api.getMonitoringStatus();
+      if (!authSession.getToken()) return;
+      const demoEvents = await api.getDemoEvents();
+      if (!authSession.getToken()) return;
+      const demoSummary = await api.getDemoBuildingSummary();
       if (mountedRef.current) setState(prev => {
         const known = new Set(demoEvents.map(event => event.event_id));
         const justResetDemo = Boolean(prev.status?.demo_simulation && !s.demo_simulation && demoEvents.length === 0);
@@ -62,8 +72,13 @@ export function useMonitoring() {
           : justResetDemo ? [] : prev.energyHistory.filter(point => point.zone_id !== "building");
         return { ...prev, status: s, error: null, events, energyHistory };
       });
-    } catch {
-      if (mountedRef.current) setState(prev => ({ ...prev, error: "Backend status is unavailable. Check that AuraTwin's API is running." }));
+    } catch (err) {
+      if (err instanceof ApiRequestError && (err.status === 401 || err.status === 403))
+        fetchBlockedRef.current = true;
+      if (mountedRef.current) setState(prev => ({ ...prev,
+        error: err instanceof Error ? err.message : "Backend status request failed." }));
+    } finally {
+      fetchInFlightRef.current = false;
     }
   }, []);
 
@@ -86,7 +101,7 @@ export function useMonitoring() {
       const ws = new WebSocket(`${WS_BASE}/api/monitoring/ws/events?access_token=${encodeURIComponent(token)}`);
       wsRef.current = ws;
       ws.onopen = () => {
-        if (wsRef.current !== ws) { ws.close(1000, "component unmounted"); return; }
+        if (wsRef.current !== ws || authSession.getToken() !== token) { ws.close(1000, "session changed"); return; }
         reconnectAttempt.current = 0;
         if (mountedRef.current) setState(prev => ({ ...prev, connected: true, connectionStatus: "connected" }));
       };
@@ -139,8 +154,7 @@ export function useMonitoring() {
           connectionStatus: event.code === 4401 ? "authentication-required"
             : event.code === 4403 ? "authorization-denied" : "disconnected" }));
         if (event.code === 4401) {
-          authSession.clear();
-          window.dispatchEvent(new Event("auratwin:session-expired"));
+          authSession.expire(token, "/api/monitoring/ws/events");
           return;
         }
         if (event.code === 4403 || event.code === 1000) return;
@@ -159,18 +173,23 @@ export function useMonitoring() {
   }, [fetchStatus]);
 
   const startMonitoring = useCallback(async () => {
-    await api.startMonitoring();
-    await fetchStatus();
+    try { await api.startMonitoring(); await fetchStatus(); }
+    catch (err) { if (mountedRef.current) setState(prev => ({ ...prev, error: err instanceof Error ? err.message : "Unable to start monitoring." })); }
   }, [fetchStatus]);
 
   const stopMonitoring = useCallback(async () => {
-    await api.stopMonitoring();
-    await fetchStatus();
+    try { await api.stopMonitoring(); await fetchStatus(); }
+    catch (err) { if (mountedRef.current) setState(prev => ({ ...prev, error: err instanceof Error ? err.message : "Unable to stop monitoring." })); }
   }, [fetchStatus]);
 
   // Initial fetch and ws connect
   useEffect(() => {
     mountedRef.current = true;
+    fetchBlockedRef.current = false;
+    if (!authSession.getToken()) {
+      setState(prev => ({ ...prev, connected: false, connectionStatus: "authentication-required" }));
+      return () => { mountedRef.current = false; };
+    }
     fetchStatus();
     connectWebSocket();
 

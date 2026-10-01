@@ -23,9 +23,17 @@ export class ApiRequestError extends Error {
   code?: string;
   missingConfiguration?: string[];
   invalidConfiguration?: string[];
-  constructor(message: string, detail?: Record<string, unknown>) {
-    super(message);
+  status?: number;
+  endpoint?: string;
+  authenticationState: "authenticated" | "expired" | "anonymous";
+  constructor(message: string, detail?: Record<string, unknown>, status?: number, endpoint?: string,
+              authenticationState: "authenticated" | "expired" | "anonymous" = "authenticated") {
+    const diagnostic = status == null ? "" : ` (HTTP ${status}${endpoint ? ` · ${endpoint}` : ""} · auth ${authenticationState})`;
+    super(`${message}${diagnostic}`);
     this.name = "ApiRequestError";
+    this.status = status;
+    this.endpoint = endpoint;
+    this.authenticationState = authenticationState;
     this.code = typeof detail?.code === "string" ? detail.code : undefined;
     this.missingConfiguration = Array.isArray(detail?.missing_configuration)
       ? detail.missing_configuration.filter((item): item is string => typeof item === "string") : undefined;
@@ -38,25 +46,45 @@ async function throwApiError(response: Response, fallback: string): Promise<neve
   const body = await response.json().catch(() => ({}));
   const detail = body?.detail;
   if (detail && typeof detail === "object") {
-    throw new ApiRequestError(typeof detail.message === "string" ? detail.message : fallback, detail);
+    throw new ApiRequestError(typeof detail.message === "string" ? detail.message : fallback, detail,
+      response.status, new URL(response.url).pathname);
   }
-  throw new ApiRequestError(typeof detail === "string" ? detail : fallback);
+  throw new ApiRequestError(typeof detail === "string" ? detail : fallback, undefined,
+    response.status, new URL(response.url).pathname);
 }
 
+let expiredToken: string | null = null;
 export const authSession = {
   getToken: () => sessionStorage.getItem(TOKEN_KEY),
-  setToken: (token: string) => sessionStorage.setItem(TOKEN_KEY, token),
+  setToken: (token: string) => { expiredToken = null; sessionStorage.setItem(TOKEN_KEY, token); },
   clear: () => sessionStorage.removeItem(TOKEN_KEY),
+  expire: (token: string, endpoint: string) => {
+    if (authSession.getToken() !== token) return;
+    authSession.clear();
+    if (expiredToken === token) return;
+    expiredToken = token;
+    window.dispatchEvent(new CustomEvent("auratwin:session-expired", { detail: { status: 401, endpoint } }));
+  },
 };
 
 export async function authFetch(input: RequestInfo | URL, init: RequestInit = {}) {
-  const headers = new Headers(init.headers);
+  const rawUrl = input instanceof Request ? input.url : input.toString();
+  const endpoint = new URL(rawUrl, window.location.href).pathname;
   const token = authSession.getToken();
-  if (token) headers.set("Authorization", `Bearer ${token}`);
+  if (!token) throw new ApiRequestError("Authentication required. Sign in to continue.", undefined, 401, endpoint, "anonymous");
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${token}`);
   const response = await fetch(input, { ...init, headers });
-  if (response.status === 401) {
-    authSession.clear();
-    window.dispatchEvent(new Event("auratwin:session-expired"));
+  if (!response.ok) {
+    const body = await response.clone().json().catch(() => ({}));
+    const detail = body?.detail;
+    const detailObject = detail && typeof detail === "object" && !Array.isArray(detail) ? detail as Record<string, unknown> : undefined;
+    const message = typeof detailObject?.message === "string" ? detailObject.message
+      : typeof detail === "string" ? detail
+      : `Request failed with HTTP ${response.status}.`;
+    const authState = response.status === 401 ? "expired" : "authenticated";
+    if (response.status === 401) authSession.expire(token, endpoint);
+    throw new ApiRequestError(message, detailObject, response.status, endpoint, authState);
   }
   return response;
 }

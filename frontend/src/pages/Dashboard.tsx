@@ -27,6 +27,7 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
   const [demoSummary, setDemoSummary] = useState<DemoBuildingSummary | null>(null);
   const [buildings, setBuildings] = useState<Array<{ building_id: string; building_key: string; organization_id: string; name: string }>>([]);
   const [selectedBuildingId, setSelectedBuildingId] = useState<string | undefined>();
+  const [buildingsError, setBuildingsError] = useState("");
 
   const refreshBuildings = useCallback(async () => {
     const items = await api.getBuildings();
@@ -35,7 +36,10 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
       ? current : items[0]?.building_id);
   }, []);
   useEffect(() => {
-    refreshBuildings().catch(() => setBuildings([]));
+    refreshBuildings().catch(err => {
+      setBuildings([]);
+      setBuildingsError(err instanceof Error ? err.message : "Unable to load authorized buildings.");
+    });
   }, [refreshBuildings]);
 
   // Centralized state from WebSocket + monitoring API
@@ -67,6 +71,7 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
       />
 
       <main className="main-content">
+        {buildingsError && <div className="demo-error" role="alert">{buildingsError}</div>}
         {buildings.length > 1 && <label className="building-selector">
           Building
           <select value={selectedBuildingId} onChange={event => {

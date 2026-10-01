@@ -201,9 +201,11 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
             {modeError instanceof ApiRequestError && modeError.code === "COMMAND_POLICY_INCOMPLETE" ? <>
               <strong>CONTROL UNAVAILABLE</strong><br />Safety command-limit policy is incomplete.
               {!!modeError.missingConfiguration?.length && <><br />Missing configuration: {modeError.missingConfiguration.join(", ")}</>}
+              {modeError.status && <><br /><small>HTTP {modeError.status} · {modeError.endpoint}</small></>}
             </> : modeError instanceof ApiRequestError && modeError.code === "COMMAND_POLICY_INVALID" ? <>
               <strong>CONTROL UNAVAILABLE</strong><br />Safety command-limit policy is invalid.
               {!!modeError.invalidConfiguration?.length && <><br />Invalid configuration: {modeError.invalidConfiguration.join(", ")}</>}
+              {modeError.status && <><br /><small>HTTP {modeError.status} · {modeError.endpoint}</small></>}
             </> : modeError instanceof ApiRequestError && modeError.code ? <><strong>{modeError.code.replaceAll("_", " ")}</strong><br />{modeError.message}</> : <>{modeError.message}</>}
           </div>}
           {controlResult && (
