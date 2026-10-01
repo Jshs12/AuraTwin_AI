@@ -14,6 +14,7 @@ from backend.intelligence.service import RecommendationWorkflow
 from backend.schemas.events import OccupancyEvent
 from backend.energy.telemetry import BuildingEnergyTelemetry
 from backend.core.time import utc_now
+from backend.services.optimization_intervals import OptimizationIntervalService
 import os
 
 
@@ -101,6 +102,16 @@ class ZoneMonitoringScheduler:
         self.demo_current_states: dict[str, Any] = {}
         self.demo_control_activity: dict[str, dict] = {}
         self.energy_telemetry = energy_telemetry or BuildingEnergyTelemetry()
+        self.optimization_intervals = OptimizationIntervalService()
+
+    def start_optimization_interval(self, state, previous_setpoint: float, optimized_setpoint: float):
+        scope = None
+        repository = self.state_service.configuration_repository
+        if repository is not None:
+            scope = repository.resolve_zone(state.zone.zone_id)
+        return self.optimization_intervals.start(state, previous_setpoint, optimized_setpoint,
+            organization_id=getattr(scope, "organization_id", None),
+            building_id=getattr(scope, "building_id", None), floor_id=getattr(scope, "floor_id", None))
 
     def start(self):
         if self._running:
@@ -248,6 +259,13 @@ class ZoneMonitoringScheduler:
             # 6. Zone State Pipeline (Full Loop)
             # The detect_from_image method already caches the result for state_service
             zstate = self.state_service.get_zone_state(zone_id)
+
+            # Hold a successfully applied decision until occupancy count changes.
+            # Identical detections do not trigger repeated recommendation/control.
+            may_evaluate, _ = self.optimization_intervals.observe(zstate)
+            if not may_evaluate:
+                state["status"] = "MONITORING · OPTIMIZATION HOLDING"
+                return
             
             # 7. Optimization
             decision = self.workflow.recommend(zstate)
@@ -260,7 +278,18 @@ class ZoneMonitoringScheduler:
             # 8. Control Service
             if (decision.validation.outcome in {"VALIDATED", "FALLBACK"}
                     and decision.validation.validated_setpoint != zstate.hvac_status.present_value):
-                self.control_service.apply_validated_recommendation(decision.validation, zstate)
+                detailed_apply = getattr(self.control_service, "apply_validated_recommendation_result", None)
+                if detailed_apply is not None:
+                    result = detailed_apply(decision.validation, zstate)
+                    if result.success and result.applied_setpoint is not None:
+                        self.start_optimization_interval(zstate,
+                            result.previous_setpoint if result.previous_setpoint is not None
+                            else zstate.hvac_status.present_value, result.applied_setpoint)
+                else:
+                    # Backward-compatible adapter path. Older implementations
+                    # return only a boolean and cannot provide enough evidence
+                    # to create an optimization interval.
+                    self.control_service.apply_validated_recommendation(decision.validation, zstate)
 
         except Exception as e:
             print(f"[ZoneMonitoringScheduler] Error processing {zone_id} ({type(e).__name__}).")
@@ -289,6 +318,17 @@ class ZoneMonitoringScheduler:
                                      {"previous_count": previous, "current_count": occupancy.people_count,
                                       "delta": occupancy.people_count - previous})
             state = self.state_service.get_zone_state(zone_id, occupancy_override=occupancy)
+            may_evaluate, _ = self.optimization_intervals.observe(state)
+            if not may_evaluate:
+                advance = getattr(self.state_service.control_provider, "advance_simulation", None)
+                if advance:
+                    advance(zone_id, occupancy.people_count, elapsed_hours)
+                state = self.state_service.get_zone_state(zone_id, occupancy_override=occupancy)
+                self.demo_current_states[zone_id] = state
+                self.energy_telemetry.record(self.demo_current_states, elapsed_hours,
+                    tariff={"rate_per_kwh": state.tariff.rate_per_kwh})
+                return {"zone_id": zone_id, "decision": None, "occupancy": occupancy,
+                        "optimization_holding": True}
             decision = self.workflow.recommend(state)
             EventTrace.log_event("OPTIMIZATION_RECOMMENDATION", zone_id, "monitoring_scheduler",
                                  {"recommended_setpoint": decision.validation.validated_setpoint,
@@ -315,6 +355,10 @@ class ZoneMonitoringScheduler:
                     "status": result.status,
                 }
                 self.demo_control_activity[zone_id] = activity
+                if result.success and result.applied_setpoint is not None:
+                    self.start_optimization_interval(state,
+                        result.previous_setpoint or state.hvac_status.present_value,
+                        result.applied_setpoint)
                 EventTrace.log_event("DEMO_CONTROL_ACTIVITY", zone_id, "demo_scenario", activity,
                                      status="SUCCESS" if result.success else "FAILED")
             advance = getattr(self.state_service.control_provider, "advance_simulation", None)

@@ -764,6 +764,19 @@ async def get_zone_state(zone_id: str, _user=Depends(require_zone_permission(Per
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@app.get("/api/zones/{zone_id}/optimization-intervals")
+async def get_optimization_intervals(zone_id: str, _user=Depends(require_zone_permission(Permission.ZONES_READ))):
+    try:
+        runtime_zone_id = zone_state_service.resolve_zone_id(zone_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    service = app.state.monitoring_scheduler.optimization_intervals
+    active = service.active(runtime_zone_id)
+    return {"active": active.model_dump(mode="json") if active else None,
+            "completed": [item.model_dump(mode="json") for item in service.history(runtime_zone_id)],
+            "persistence": "PROCESS_LOCAL"}
+
+
 @app.get("/api/zones/{zone_id}/control-state")
 async def get_zone_control_state(zone_id: str, _user=Depends(require_zone_permission(Permission.ZONES_READ))):
     try:
@@ -867,6 +880,12 @@ async def generate_recommendation(zone_id: str, _user=Depends(require_zone_permi
     try:
         EventTrace.log_event("OPTIMIZATION_REQUESTED", zone_id, "api", {})
         state = zone_state_service.get_zone_state(zone_id)
+        may_evaluate, active = app.state.monitoring_scheduler.optimization_intervals.observe(state)
+        if not may_evaluate:
+            raise HTTPException(status_code=409, detail={"code": "OPTIMIZATION_HOLDING",
+                "message": "The validated setpoint is being held until the next occupancy change.",
+                "interval_id": active.interval_id if active else None,
+                "optimized_setpoint": active.optimized_setpoint if active else None})
         decision = recommendation_workflow.recommend(state)
         EventTrace.log_event(
             "OPTIMIZATION_RECOMMENDATION",
@@ -894,6 +913,12 @@ async def apply_control(zone_id: str, decision: RecommendationSubmission,
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
+    may_evaluate, active_interval = app.state.monitoring_scheduler.optimization_intervals.observe(state)
+    if not may_evaluate:
+        raise HTTPException(status_code=409, detail={"code": "OPTIMIZATION_HOLDING",
+            "message": "The current setpoint remains active until occupancy changes; repeated commands are suppressed.",
+            "interval_id": active_interval.interval_id if active_interval else None})
+
     # Rebuild and validate the submitted advisory against fresh state. Client-supplied
     # validation outcomes and setpoints are never trusted.
     if decision.recommendation_kind == "deterministic_fallback" and decision.deterministic_recommendation:
@@ -911,6 +936,10 @@ async def apply_control(zone_id: str, decision: RecommendationSubmission,
         candidate = decision.intelligence_recommendation
     checked = recommendation_workflow.validate_submitted(state, candidate)
     result = control_service.apply_validated_recommendation_result(checked.validation, state)
+    if result.success and result.applied_setpoint is not None and result.previous_setpoint != result.applied_setpoint:
+        app.state.monitoring_scheduler.start_optimization_interval(
+            state, result.previous_setpoint if result.previous_setpoint is not None else state.hvac_status.present_value,
+            result.applied_setpoint)
     audit.record(user_id=user.user_id, role=user.role.value, action="control_execute",
                  resource="zone", resource_id=zone_id, building_id=building_id,
                  success=result.success, metadata={"simulated": bool(result.simulated)})

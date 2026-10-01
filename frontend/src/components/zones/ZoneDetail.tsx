@@ -14,6 +14,7 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
     history,
     recommendation,
     controlResult,
+    optimizationIntervals,
     loading,
     error,
     refresh,
@@ -260,6 +261,32 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
       {canOperate && <CVPanel zoneId={zoneId} />}
 
       {/* Recommendation */}
+      <section className="optimization-lifecycle">
+        {optimizationIntervals?.active ? <article className="optimization-interval-card active-interval">
+          <div className="optimization-card-header"><div><p className="eyebrow">AURATWIN OPTIMIZATION</p><h2>Active optimization</h2></div><span className="badge success">HOLDING OPTIMIZED SETPOINT</span></div>
+          <div className="optimization-interval-grid">
+            <div><small>OCCUPANCY</small><strong>{optimizationIntervals.active.starting_occupancy} people</strong></div>
+            <div><small>ROOM TEMPERATURE</small><strong>{optimizationIntervals.active.starting_temperature.toFixed(1)}°C</strong></div>
+            <div><small>HVAC SETPOINT</small><strong>{optimizationIntervals.active.previous_setpoint.toFixed(1)}°C <span>→</span> {optimizationIntervals.active.optimized_setpoint.toFixed(1)}°C</strong></div>
+            <div><small>STARTED</small><strong>{new Date(optimizationIntervals.active.started_at).toLocaleString()}</strong></div>
+            <div><small>DURATION</small><strong>{Math.max(0, Math.floor((Date.now() - Date.parse(optimizationIntervals.active.started_at)) / 60000))} min</strong></div>
+            <div><small>NEXT EVALUATION</small><strong>Waiting for next occupancy change</strong></div>
+          </div>
+          <div className="interval-impact"><div><small>ENERGY CONSUMED</small><strong>{optimizationIntervals.active.energy_consumed_kwh == null ? "Impact unavailable — awaiting validated energy telemetry" : `${optimizationIntervals.active.energy_consumed_kwh.toFixed(3)} kWh`}</strong></div>
+            <div><small>COST CONSUMED</small><strong>{optimizationIntervals.active.cost_consumed == null ? "Awaiting validated telemetry" : `${optimizationIntervals.active.currency ?? ""} ${optimizationIntervals.active.cost_consumed.toFixed(3)}`}</strong></div>
+            {optimizationIntervals.active.simulated && <span className="badge warning">SIMULATED · NOT METER DATA</span>}
+          </div>
+        </article> : null}
+        {optimizationIntervals?.completed.slice(0, 3).map(interval => <article className="optimization-interval-card completed-interval" key={interval.interval_id}>
+          <div className="optimization-card-header"><div><p className="eyebrow">OPTIMIZATION COMPLETE</p><h2>{interval.starting_occupancy} → {interval.ending_occupancy ?? "—"} people</h2></div><span className="badge neutral">COMPLETED</span></div>
+          <div className="interval-impact"><div><small>HVAC SETPOINT</small><strong>{interval.previous_setpoint.toFixed(1)}°C → {interval.optimized_setpoint.toFixed(1)}°C</strong></div>
+            <div><small>DURATION</small><strong>{interval.duration_seconds == null ? "—" : `${Math.round(interval.duration_seconds / 60)} min`}</strong></div>
+            <div><small>ENERGY CONSUMED</small><strong>{interval.energy_consumed_kwh == null ? "Awaiting validated telemetry" : `${interval.energy_consumed_kwh.toFixed(3)} kWh`}</strong></div>
+            <div><small>COST CONSUMED</small><strong>{interval.cost_consumed == null ? "Awaiting validated telemetry" : `${interval.currency ?? ""} ${interval.cost_consumed.toFixed(3)}`}</strong></div>
+            {interval.simulated && <span className="badge warning">SIMULATED · NOT SAVINGS</span>}
+          </div>
+        </article>)}
+      </section>
       <Card title="Recommendation · advisory and safety checked">
               {recommendation ? (
           <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
@@ -300,7 +327,7 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
                   ? ` · ${recommendation.intelligence_recommendation.provider} · confidence ${recommendation.intelligence_recommendation.confidence}` : ""}
               </div>
               {recommendation.validation.fallback_reason && <div className="badge warning">Fallback: {recommendation.validation.fallback_reason}</div>}
-              {recommendation.validation.rejection_reason && <div className="badge danger">Rejected: {recommendation.validation.rejection_reason}</div>}
+              {recommendation.validation.rejection_reason && <div className="optimization-rejected" role="status"><strong>OPTIMIZATION REJECTED</strong><span>{recommendation.validation.rejection_reason}</span></div>}
             </div>
 
             {canOperate && <Button variant={controlBlockedReason || recommendation.validation.validated_setpoint === null ? "neutral" : "primary"} onClick={applyRecommendation} disabled={loading || recommendation.validation.validated_setpoint === null || Boolean(controlBlockedReason)}>
@@ -322,7 +349,8 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
 
       {/* Error message */}
       {error && (
-        <div style={{ color: "var(--accent-red)", fontSize: "0.875rem", padding: "0.5rem 0" }}>
+        <div className={error.includes("holding") ? "optimization-holding-notice" : "optimization-request-error"}
+          role={error.includes("holding") ? "status" : "alert"}>
           {error}
         </div>
       )}

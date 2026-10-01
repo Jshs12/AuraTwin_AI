@@ -352,6 +352,12 @@ export const api = {
     return res.json();
   },
 
+  async getOptimizationIntervals(zoneId: string) {
+    const res = await authFetch(`${API_BASE}/zones/${encodeURIComponent(zoneId)}/optimization-intervals`);
+    if (!res.ok) await throwApiError(res, "Unable to load optimization interval status.");
+    return res.json() as Promise<{ active: OptimizationInterval | null; completed: OptimizationInterval[]; persistence: "PROCESS_LOCAL" }>;
+  },
+
   async setManualOverride(zoneId: string, enabled: boolean) {
     const res = await authFetch(`${API_BASE}/zones/${zoneId}/manual-override`, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -488,4 +494,15 @@ export interface KnowledgeResult {
   document_id: string; document_name: string; chunk_id: string; text: string; score: number | null;
   page: number | null; section: string | null; building_id: string; source: string | null; version: number;
   provenance: string; simulated: boolean; category: string;
+}
+
+export interface OptimizationInterval {
+  interval_id: string; zone_id: string; started_at: string; ended_at: string | null;
+  starting_occupancy: number; ending_occupancy: number | null; starting_temperature: number;
+  ending_temperature: number | null; previous_setpoint: number; optimized_setpoint: number;
+  occupancy_observed_at: string | null; duration_seconds: number | null;
+  energy_consumed_kwh: number | null; cost_consumed: number | null;
+  tariff_rate_per_kwh: number | null; currency: string | null;
+  status: "ACTIVE" | "COMPLETED"; source: string; simulated: boolean;
+  energy_provenance: string | null; reason: string;
 }

@@ -21,6 +21,7 @@ import { BuildingOnboarding } from "../components/integrations/BuildingOnboardin
 import { KnowledgePanel } from "../components/knowledge/KnowledgePanel";
 import { BuildingCommandCenter } from "../components/dashboard/BuildingCommandCenter";
 import { defaultZoneSelection } from "../utils/zoneSelection";
+import type { OptimizationInterval } from "../services/api";
 
 type Section = "Overview" | "Zones" | "Occupancy" | "Energy" | "Knowledge" | "Events" | "Integrations" | "Access" | "Audit";
 
@@ -31,6 +32,7 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
   const [buildings, setBuildings] = useState<Array<{ building_id: string; building_key: string; organization_id: string; name: string }>>([]);
   const [selectedBuildingId, setSelectedBuildingId] = useState<string | undefined>();
   const [buildingsError, setBuildingsError] = useState("");
+  const [activeIntervals, setActiveIntervals] = useState<OptimizationInterval[]>([]);
 
   const refreshBuildings = useCallback(async () => {
     const items = await api.getBuildings();
@@ -54,6 +56,16 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
     const nextSelection = defaultZoneSelection(zones, selectedZoneId);
     if (nextSelection !== selectedZoneId) setSelectedZoneId(nextSelection);
   }, [zones, selectedZoneId]);
+  useEffect(() => {
+    let active = true;
+    const refreshIntervals = async () => {
+      const results = await Promise.all(zones.map(zone => api.getOptimizationIntervals(zone.zone_id).catch(() => null)));
+      if (active) setActiveIntervals(results.flatMap(result => result?.active ? [result.active] : []));
+    };
+    if (zones.length) void refreshIntervals(); else setActiveIntervals([]);
+    const timer = window.setInterval(() => { if (zones.length) void refreshIntervals(); }, 10000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [zones]);
   const updateDemoSummary = useCallback((summary: DemoBuildingSummary) => setDemoSummary(summary), []);
   const energyHistory = demoSummary?.scenario_id
     ? demoSummary.energy_history.map(sample => ({
@@ -95,6 +107,7 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
               buildingName={buildings.find(item => item.building_id === selectedBuildingId)?.name ?? ""}
               zones={zones} status={monitoring.status} events={monitoring.events}
               power={displayPower} energyHistory={energyHistory} demoSummary={demoSummary}
+              activeIntervals={activeIntervals}
             />
             {role === "OPERATOR" && <DemoModePanel onSummary={updateDemoSummary} />}
             <Summary

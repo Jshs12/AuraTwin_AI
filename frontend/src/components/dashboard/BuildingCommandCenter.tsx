@@ -2,10 +2,12 @@ import type { DemoBuildingSummary } from "../../types/api";
 import type { EnergyDataPoint } from "../../hooks/useMonitoring";
 import type { Zone, MonitoringStatus, SystemEvent } from "../../types/api";
 import { formatISTTimestamp } from "../../utils/time";
+import type { OptimizationInterval } from "../../services/api";
 
-export function BuildingCommandCenter({ buildingName, zones, status, events, power, energyHistory, demoSummary }:{
+export function BuildingCommandCenter({ buildingName, zones, status, events, power, energyHistory, demoSummary, activeIntervals }:{
   buildingName: string; zones: Zone[]; status: MonitoringStatus | null; events: SystemEvent[];
   power: number; energyHistory: EnergyDataPoint[]; demoSummary?: DemoBuildingSummary | null;
+  activeIntervals: OptimizationInterval[];
 }) {
   const latest = events[0];
   const monitored = new Map((status?.zones ?? []).map(zone => [zone.zone_id, zone]));
@@ -21,6 +23,12 @@ export function BuildingCommandCenter({ buildingName, zones, status, events, pow
         <span className="badge warning">{demoSummary?.scenario_id || status?.demo_simulation ? "DEMO SIMULATION" : "SIMULATED SYSTEMS"}</span>
         {updatedAt && <small>Updated {formatISTTimestamp(updatedAt)}</small>}
       </div>
+    </div>
+    <div className="command-metrics" aria-label="Building at a glance">
+      <article><small>OCCUPANCY</small><strong>{total}<span> people</span></strong></article>
+      <article><small>CONFIGURED ZONES</small><strong>{zones.length}<span> zones</span></strong></article>
+      <article><small>ACTIVE OPTIMIZATIONS</small><strong>{activeIntervals.length}<span> holding</span></strong></article>
+      <article><small>SIMULATED POWER</small><strong>{power.toFixed(1)}<span> kW</span></strong></article>
     </div>
     <div className="command-center-grid">
       <article className="command-panel occupancy-panel">
@@ -47,5 +55,13 @@ export function BuildingCommandCenter({ buildingName, zones, status, events, pow
           : <div className="product-empty-state compact">No events recorded yet.</div>}
       </article>
     </div>
+    {!!activeIntervals.length && <section className="command-panel overview-intervals"><div className="panel-heading"><div><span className="panel-kicker">ACTIVE OPTIMIZATIONS</span><h2>{activeIntervals.length} <small>holding</small></h2></div><span className="badge warning">SIMULATED HVAC · SAFETY GATES ACTIVE</span></div>
+      <div className="overview-interval-list">{activeIntervals.map(interval => <article key={interval.interval_id}>
+        <strong>{zones.find(zone => zone.zone_id === interval.zone_id)?.name ?? interval.zone_id}</strong>
+        <span>{interval.starting_occupancy} people · {interval.starting_temperature.toFixed(1)}°C</span>
+        <b>{interval.previous_setpoint.toFixed(1)}°C → {interval.optimized_setpoint.toFixed(1)}°C</b>
+        <small>Holding until occupancy changes · started {formatISTTimestamp(interval.started_at)}</small>
+      </article>)}</div>
+    </section>}
   </section>;
 }
