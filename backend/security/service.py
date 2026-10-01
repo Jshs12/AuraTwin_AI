@@ -23,10 +23,16 @@ class AuthService:
         if email and password and not self.users.get_by_email(email):
             self.users.add(User(str(uuid.uuid4()), email.strip().lower(), hash_password(password),
                                 Role.ADMIN, True, frozenset(), frozenset()))
-        if operator_email and operator_password and not self.users.get_by_email(operator_email):
+        if operator_email and operator_password:
             building_id = os.getenv("AURATWIN_BOOTSTRAP_OPERATOR_BUILDING_ID", DEVELOPMENT_BUILDING_ID)
-            self.users.add(User(str(uuid.uuid4()), operator_email.strip().lower(), hash_password(operator_password),
-                                Role.OPERATOR, True, frozenset({building_id}), frozenset()))
+            existing_operator = self.users.get_by_email(operator_email)
+            if existing_operator is None:
+                self.users.add(User(str(uuid.uuid4()), operator_email.strip().lower(), hash_password(operator_password),
+                                    Role.OPERATOR, True, frozenset({building_id}), frozenset()))
+                existing_operator = self.users.get_by_email(operator_email)
+            reconcile = getattr(self.users, "ensure_operator_building_access", None)
+            if existing_operator is not None and existing_operator.role == Role.OPERATOR and reconcile is not None:
+                reconcile(existing_operator.user_id, building_id)
 
     def authenticate(self, email: str, password: str):
         user = self.users.get_by_email(email.strip().lower())

@@ -172,7 +172,7 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
           </div>
         )}
         {activeSection === "Access" && <AccessPanel role={role} />}
-        {activeSection === "Integrations" && role === "OPERATOR" && <IntegrationConfiguration buildingId={selectedBuildingId} />}
+        {activeSection === "Integrations" && role === "OPERATOR" && <IntegrationConfiguration buildingId={selectedBuildingId} zones={zones} />}
         {activeSection === "Audit" && role === "ADMIN" && <AuditPanel />}
       </main>
     </div>

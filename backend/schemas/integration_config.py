@@ -89,6 +89,7 @@ class DeviceUpdate(StrictInput):
 
 
 class PointCreate(StrictInput):
+    zone_id: str | None = None
     external_point_id: str = Field(min_length=1, max_length=250)
     logical_signal: str = Field(min_length=1, max_length=100)
     data_type: str = Field(min_length=1, max_length=40)
@@ -116,6 +117,7 @@ class PointCreate(StrictInput):
 
 
 class PointUpdate(StrictInput):
+    zone_id: str | None = None
     logical_signal: str | None = Field(default=None, min_length=1, max_length=100)
     data_type: str | None = Field(default=None, min_length=1, max_length=40)
     unit: str | None = Field(default=None, max_length=40)

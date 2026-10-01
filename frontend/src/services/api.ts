@@ -148,6 +148,11 @@ export const api = {
     if (!res.ok) throw new Error("Unable to load logical signal mappings");
     return (await res.json()).points as Array<any>;
   },
+  async getPointLatestObservation(pointId: string) {
+    const res = await authFetch(`${API_BASE}/point-mappings/${encodeURIComponent(pointId)}/latest-observation`);
+    if (!res.ok) throw new Error("Unable to load latest mapped observation");
+    return (await res.json()).observation as Record<string, unknown> | null;
+  },
   async createDevicePoint(deviceId: string, payload: Record<string, unknown>) {
     const res = await authFetch(`${API_BASE}/devices/${encodeURIComponent(deviceId)}/points`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),

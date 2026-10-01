@@ -65,6 +65,7 @@ class TelemetryPersistenceService:
             EventTrace.log_event("TELEMETRY_PERSISTENCE_FAILED", state.zone.zone_id,
                 "telemetry_persistence", {"error_type": type(exc).__name__}, status="FAILED")
             return 0
+
         if scope is None:
             return 0
         quality = state.data_quality.signals
@@ -106,6 +107,15 @@ class TelemetryPersistenceService:
             EventTrace.log_event("TELEMETRY_PERSISTENCE_FAILED", state.zone.zone_id,
                 "telemetry_persistence", {"error_type": type(exc).__name__}, status="FAILED")
             return 0
+
+    def persist_observation(self, observation: TelemetryObservation) -> int:
+        """Persist one resolved observation only when every supplied scope ID matches configuration."""
+        scope = self.configuration_repository.telemetry_scope(observation.zone_id)
+        if scope is None or any((observation.organization_id != scope["organization_id"],
+            observation.building_id != scope["building_id"], observation.floor_id != scope["floor_id"],
+            observation.zone_id != scope["database_zone_id"])):
+            raise ValueError("Observation scope does not match persistent zone ownership")
+        return self.repository.add_many([observation])
 
     def list_zone(self, *, organization_id: str, building_id: str, zone_id: str,
                   start_at: datetime | None = None, end_at: datetime | None = None,

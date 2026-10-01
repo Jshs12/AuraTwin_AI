@@ -72,7 +72,7 @@ class DataQualityGate:
                observation_timestamp: datetime | None = None, simulated: bool = False,
                required: bool = True, now: datetime | None = None,
                minimum: float | None = None, maximum: float | None = None,
-               numeric: bool = False) -> SignalQualityAssessment:
+               numeric: bool = False, freshness_signal: str | None = None) -> SignalQualityAssessment:
         """Apply missing, structural, numeric, range, then freshness checks."""
         def result(state: QualityState, reason: str | None = None):
             return SignalQualityAssessment(signal=signal, state=state, source=source or "unknown",
@@ -100,7 +100,7 @@ class DataQualityGate:
 
         # Timestamp provenance is supplied separately from snapshot/read time.
         # No age threshold is guessed; configured limits enable STALE decisions.
-        age_limit = self.max_age_seconds.get(signal)
+        age_limit = self.max_age_seconds.get(freshness_signal or signal)
         reference = now or utc_now()
         if reference.tzinfo is None or reference.utcoffset() is None:
             reference = reference.replace(tzinfo=timezone.utc)

@@ -234,6 +234,7 @@ class PointMappingRecord(TimestampMixin, Base):
 
     point_mapping_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     device_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("devices.device_id", ondelete="CASCADE"), nullable=False, index=True)
+    zone_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), ForeignKey("zones.zone_id", ondelete="SET NULL"), index=True)
     external_point_id: Mapped[str] = mapped_column(String(250), nullable=False)
     logical_signal: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     data_type: Mapped[str] = mapped_column(String(40), nullable=False)

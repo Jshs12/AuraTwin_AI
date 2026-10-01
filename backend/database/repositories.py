@@ -134,6 +134,36 @@ class SQLAlchemyUserRepository(UserRepository):
                                             for organization_id in organizations]
             session.add(row)
 
+    def ensure_operator_building_access(self, user_id: str, building_identifier: str) -> None:
+        """Idempotently reconcile the configured bootstrap operator's one building assignment."""
+        try:
+            user_uuid = UUID(user_id)
+        except (ValueError, TypeError):
+            raise ValueError("Bootstrap operator was not found") from None
+        try:
+            building_uuid = UUID(building_identifier)
+        except (ValueError, TypeError):
+            building_uuid = None
+        with self.sessions.begin() as session:
+            user = session.get(UserRecord, user_uuid)
+            if user is None or user.role != Role.OPERATOR.value:
+                raise ValueError("Configured bootstrap account is not an operator")
+            building = (session.get(BuildingRecord, building_uuid) if building_uuid else
+                session.scalar(select(BuildingRecord).where(BuildingRecord.building_key == building_identifier)))
+            if building is None or building.archived_at is not None:
+                raise ValueError("Bootstrap operator building assignment is invalid")
+            assignment = session.scalar(select(UserBuildingAccessRecord.assignment_id).where(
+                UserBuildingAccessRecord.user_id == user_uuid,
+                UserBuildingAccessRecord.building_id == building.building_id))
+            if assignment is None:
+                session.add(UserBuildingAccessRecord(user_id=user_uuid, building_id=building.building_id))
+            membership = session.scalar(select(OrganizationMembershipRecord.membership_id).where(
+                OrganizationMembershipRecord.user_id == user_uuid,
+                OrganizationMembershipRecord.organization_id == building.organization_id))
+            if membership is None:
+                session.add(OrganizationMembershipRecord(user_id=user_uuid,
+                    organization_id=building.organization_id))
+
     def list_users(self) -> list[User]:
         with self.sessions() as session:
             return [self._user(row) for row in session.scalars(select(UserRecord).order_by(UserRecord.email)).all()]

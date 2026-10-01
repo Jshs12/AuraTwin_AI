@@ -89,6 +89,7 @@ def _device_dict(row, integration):
 def _point_dict(row, device, integration):
     return {"point_mapping_id": str(row.point_mapping_id), "point_id": str(row.point_mapping_id),
         "device_id": str(row.device_id), "integration_id": str(device.integration_id),
+        "zone_id": str(row.zone_id) if row.zone_id else None,
         "building_id": str(integration.building_id), "external_point_id": row.external_point_id,
         "logical_signal": row.logical_signal, "data_type": row.data_type, "unit": row.unit,
         "readable": row.readable, "writable": row.writable, "metadata": dict(row.metadata_json or {}),
@@ -271,7 +272,12 @@ def create_point(device_id: str, body: PointCreate, request: Request,
                  user=Depends(require_permission(Permission.INTEGRATIONS_CONFIGURE))):
     with _session(request).begin() as session:
         device, integration = _device(session, request, user, device_id, write=True)
+        if body.zone_id:
+            zone = request.app.state.configuration_repository.resolve_zone(body.zone_id)
+            if zone is None or zone.building_id != str(integration.building_id):
+                raise HTTPException(404, "Zone not found in this building")
         row = PointMappingRecord(point_mapping_id=uuid4(), device_id=device.device_id,
+            zone_id=_uuid(body.zone_id) if body.zone_id else None,
             external_point_id=body.external_point_id, logical_signal=body.logical_signal,
             data_type=body.data_type, unit=body.unit, readable=body.readable, writable=body.writable,
             metadata_json=body.metadata, mapping_status=body.mapping_status,
@@ -292,6 +298,24 @@ def get_point(point_id: str, request: Request,
         return _point_dict(row, device, integration)
 
 
+@router.get("/point-mappings/{point_id}/latest-observation")
+def get_latest_point_observation(point_id: str, request: Request,
+                                 user=Depends(require_permission(Permission.BUILDING_READ))):
+    with _session(request)() as session:
+        row, device, integration = _point(session, request, user, point_id)
+        if row.mapping_status != "CONFIRMED" or row.zone_id is None:
+            return {"observation": None, "reason": "MAPPING_NOT_INGESTIBLE"}
+        scope = request.app.state.configuration_repository.telemetry_scope(str(row.zone_id))
+        if scope is None:
+            return {"observation": None, "reason": "ZONE_NOT_CONFIGURED"}
+        signal = row.logical_signal
+        observations = request.app.state.telemetry_service.list_zone(
+            organization_id=scope["organization_id"], building_id=scope["building_id"],
+            zone_id=scope["database_zone_id"], signal=signal, limit=1)
+        latest = observations[0].model_dump(mode="json") if observations else None
+        return {"observation": latest}
+
+
 @router.patch("/point-mappings/{point_id}")
 def update_point(point_id: str, body: PointUpdate, request: Request,
                  user=Depends(require_permission(Permission.INTEGRATIONS_CONFIGURE))):
@@ -300,6 +324,11 @@ def update_point(point_id: str, body: PointUpdate, request: Request,
         patch["metadata_json"] = patch.pop("metadata")
     with _session(request).begin() as session:
         row, device, integration = _point(session, request, user, point_id, write=True)
+        if patch.get("zone_id"):
+            zone = request.app.state.configuration_repository.resolve_zone(patch["zone_id"])
+            if zone is None or zone.building_id != str(integration.building_id):
+                raise HTTPException(404, "Zone not found in this building")
+            patch["zone_id"] = _uuid(patch["zone_id"])
         for key, value in patch.items():
             setattr(row, key, value)
         if patch.get("mapping_status") == "CONFIRMED":
