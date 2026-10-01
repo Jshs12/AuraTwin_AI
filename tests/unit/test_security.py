@@ -23,12 +23,14 @@ def test_only_two_roles_and_explicit_permissions():
     assert set(ROLE_PERMISSIONS) == {Role.ADMIN, Role.OPERATOR}
     assert ADMIN_PERMISSIONS == {Permission.BUILDING_READ, Permission.ZONES_READ,
         Permission.TELEMETRY_READ, Permission.ENERGY_READ, Permission.EVENTS_READ,
-        Permission.SYSTEM_READ, Permission.AUDIT_READ, Permission.ACCESS_READ}
+        Permission.SYSTEM_READ, Permission.AUDIT_READ, Permission.ACCESS_READ,
+        Permission.KNOWLEDGE_READ}
     assert OPERATOR_PERMISSIONS == {Permission.BUILDING_READ, Permission.BUILDING_CONFIGURE,
         Permission.ZONES_READ, Permission.ZONES_CREATE, Permission.ZONES_UPDATE,
         Permission.ZONES_DELETE, Permission.INTEGRATIONS_CONFIGURE,
         Permission.MONITORING_MANAGE, Permission.RECOMMENDATIONS_READ,
-        Permission.CONTROL_EXECUTE, Permission.ACCESS_MANAGE}
+        Permission.CONTROL_EXECUTE, Permission.ACCESS_MANAGE, Permission.KNOWLEDGE_READ,
+        Permission.KNOWLEDGE_MANAGE}
     assert has_permission(Role.OPERATOR, Permission.CONTROL_EXECUTE)
     assert not has_permission(Role.ADMIN, Permission.CONTROL_EXECUTE)
     assert not has_permission(Role.ADMIN, "unknown:permission")

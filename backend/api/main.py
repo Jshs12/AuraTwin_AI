@@ -78,6 +78,7 @@ from backend.schemas.telemetry import TelemetryAnalyticsResponse, TelemetrySigna
 from datetime import datetime
 from backend.api.configuration import router as configuration_router
 from backend.api.integrations import router as integrations_router
+from backend.api.knowledge import router as knowledge_router
 from backend.integrations.connection_test import ConfigurationOnlyTester
 from backend.integrations.discovery import NoDiscoveryProvider
 
@@ -238,6 +239,7 @@ app.state.provider_observation_ingestion_service = ProviderObservationIngestionS
 app.include_router(monitoring.router, prefix="/api/monitoring")
 app.include_router(configuration_router, prefix="/api")
 app.include_router(integrations_router, prefix="/api")
+app.include_router(knowledge_router, prefix="/api")
 
 
 def _public_user(request: Request, user: User):

@@ -24,18 +24,22 @@ class Permission(StrEnum):
     MONITORING_MANAGE = "monitoring:manage"
     RECOMMENDATIONS_READ = "recommendations:read"
     CONTROL_EXECUTE = "control:execute"
+    KNOWLEDGE_READ = "knowledge:read"
+    KNOWLEDGE_MANAGE = "knowledge:manage"
 
 
 ADMIN_PERMISSIONS = frozenset({
     Permission.BUILDING_READ, Permission.ZONES_READ, Permission.TELEMETRY_READ,
     Permission.ENERGY_READ, Permission.EVENTS_READ, Permission.SYSTEM_READ,
     Permission.AUDIT_READ, Permission.ACCESS_READ,
+    Permission.KNOWLEDGE_READ,
 })
 OPERATOR_PERMISSIONS = frozenset({
     Permission.BUILDING_READ, Permission.BUILDING_CONFIGURE, Permission.ZONES_READ,
     Permission.ZONES_CREATE, Permission.ZONES_UPDATE, Permission.ZONES_DELETE,
     Permission.INTEGRATIONS_CONFIGURE, Permission.MONITORING_MANAGE,
     Permission.RECOMMENDATIONS_READ, Permission.CONTROL_EXECUTE, Permission.ACCESS_MANAGE,
+    Permission.KNOWLEDGE_READ, Permission.KNOWLEDGE_MANAGE,
 })
 ROLE_PERMISSIONS = {Role.ADMIN: ADMIN_PERMISSIONS, Role.OPERATOR: OPERATOR_PERMISSIONS}
 

@@ -160,6 +160,57 @@ export const api = {
     return res.json() as Promise<{ ready: boolean; missing_configuration: string[]; invalid_configuration: string[]; reason_code: string | null }>;
   },
 
+  async getKnowledgeDocuments(buildingId: string) {
+    const res = await authFetch(`${API_BASE}/buildings/${encodeURIComponent(buildingId)}/knowledge/documents`);
+    if (!res.ok) await throwApiError(res, "Unable to load building knowledge.");
+    return (await res.json()).documents as KnowledgeDocument[];
+  },
+  async registerKnowledgeDocument(buildingId: string, payload: {
+    name: string; category: string; file: File; description?: string;
+    source_reference?: string; floor_id?: string; zone_id?: string; simulated: boolean;
+  }) {
+    const form = new FormData();
+    form.set("name", payload.name); form.set("category", payload.category);
+    form.set("file", payload.file); form.set("simulated", String(payload.simulated));
+    if (payload.description) form.set("description", payload.description);
+    if (payload.source_reference) form.set("source_reference", payload.source_reference);
+    if (payload.floor_id) form.set("floor_id", payload.floor_id);
+    if (payload.zone_id) form.set("zone_id", payload.zone_id);
+    const res = await authFetch(`${API_BASE}/buildings/${encodeURIComponent(buildingId)}/knowledge/documents`, { method: "POST", body: form });
+    if (!res.ok) await throwApiError(res, "Unable to register the knowledge document.");
+    return await res.json() as KnowledgeDocument;
+  },
+  async ingestKnowledgeDocument(buildingId: string, documentId: string) {
+    const res = await authFetch(`${API_BASE}/buildings/${encodeURIComponent(buildingId)}/knowledge/documents/${encodeURIComponent(documentId)}/ingest`, { method: "POST" });
+    if (!res.ok) await throwApiError(res, "Unable to ingest the knowledge document.");
+    return await res.json() as { document_status: string; ingestion_status: string; ingestion_error_code?: string | null; chunks: number; pages?: number | null; version: number };
+  },
+  async addKnowledgeVersion(buildingId: string, documentId: string, file: File) {
+    const form = new FormData(); form.set("file", file);
+    const res = await authFetch(`${API_BASE}/buildings/${encodeURIComponent(buildingId)}/knowledge/documents/${encodeURIComponent(documentId)}/versions`, { method: "POST", body: form });
+    if (!res.ok) await throwApiError(res, "Unable to register a new document version.");
+    return await res.json() as KnowledgeDocument;
+  },
+  async updateKnowledgeDocument(buildingId: string, documentId: string, payload: Record<string, unknown>) {
+    const res = await authFetch(`${API_BASE}/buildings/${encodeURIComponent(buildingId)}/knowledge/documents/${encodeURIComponent(documentId)}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    if (!res.ok) await throwApiError(res, "Unable to update document details.");
+    return await res.json() as KnowledgeDocument;
+  },
+  async archiveKnowledgeDocument(buildingId: string, documentId: string) {
+    const res = await authFetch(`${API_BASE}/buildings/${encodeURIComponent(buildingId)}/knowledge/documents/${encodeURIComponent(documentId)}/archive`, { method: "POST" });
+    if (!res.ok) await throwApiError(res, "Unable to archive document.");
+    return await res.json() as { document_id: string; management_status: string };
+  },
+  async retrieveKnowledge(buildingId: string, query: string, top_k = 5) {
+    const res = await authFetch(`${API_BASE}/buildings/${encodeURIComponent(buildingId)}/knowledge/retrieve`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query, top_k }),
+    });
+    if (!res.ok) await throwApiError(res, "Unable to search building knowledge.");
+    return await res.json() as { provider: string; semantic_search: boolean; control_authority: string; results: KnowledgeResult[] };
+  },
+
   async getIntegrations(buildingId: string) {
     const res = await authFetch(`${API_BASE}/buildings/${encodeURIComponent(buildingId)}/integrations`);
     if (!res.ok) throw new Error("Unable to load building integrations");
@@ -424,3 +475,17 @@ export const api = {
     return data.events as SystemEvent[];
   }
 };
+
+export interface KnowledgeDocument {
+  document_id: string; organization_id: string; building_id: string; floor_id: string | null; zone_id: string | null;
+  name: string; category: string; description: string | null; source_reference: string | null;
+  ingestion_status: string; management_status: string; simulated: boolean; created_at: string; updated_at: string;
+  versions: Array<{ version_id: string; version: number; file_name: string; file_format: string;
+    content_hash: string; ingestion_status: string; ingestion_error_code: string | null;
+    provenance: string; is_active: boolean; pages: number | null; chunks: number; created_at: string }>;
+}
+export interface KnowledgeResult {
+  document_id: string; document_name: string; chunk_id: string; text: string; score: number | null;
+  page: number | null; section: string | null; building_id: string; source: string | null; version: number;
+  provenance: string; simulated: boolean; category: string;
+}

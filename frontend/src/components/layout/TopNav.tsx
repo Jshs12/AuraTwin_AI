@@ -10,7 +10,11 @@ interface TopNavProps {
 }
 
 export function TopNav({ activeSection, onNavigate, monitoringRunning, wsConnected, demoSimulation, occupancyProvider, occupancyProviderReady, role }: TopNavProps) {
-  const sections = ["Overview", "Zones", "Occupancy", "Energy", "Events", ...(role === "OPERATOR" ? ["Integrations"] : []), "Access", ...(role === "ADMIN" ? ["Audit"] : [])];
+  const groups = [
+    { label: "Operations", sections: ["Overview", "Zones", "Occupancy", "Energy"] },
+    { label: "Intelligence", sections: ["Knowledge", "Events"] },
+    { label: "Configuration", sections: [...(role === "OPERATOR" ? ["Integrations"] : []), "Access", ...(role === "ADMIN" ? ["Audit"] : [])] },
+  ];
   const occupancyLabel = demoSimulation
     ? "DEMO SIMULATED"
     : occupancyProvider === "yolo"
@@ -29,8 +33,10 @@ export function TopNav({ activeSection, onNavigate, monitoringRunning, wsConnect
           </svg>
           AuraTwin AI
         </div>
-        <div style={{ display: "flex", gap: "0.25rem" }}>
-          {sections.map((s) => (
+        <div className="nav-groups">
+          {groups.map(group => <div className="nav-group" key={group.label}>
+            <span className="nav-group-label">{group.label}</span>
+            <div className="nav-group-items">{group.sections.map((s) => (
             <button
               key={s}
               className={`nav-btn ${activeSection === s ? "nav-btn-active" : ""}`}
@@ -51,7 +57,8 @@ export function TopNav({ activeSection, onNavigate, monitoringRunning, wsConnect
             >
               {s}
             </button>
-          ))}
+            ))}</div>
+          </div>)}
         </div>
       </div>
 

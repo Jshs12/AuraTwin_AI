@@ -13,3 +13,4 @@ argon2-cffi
 SQLAlchemy>=2.0,<3.0
 alembic>=1.13,<2.0
 psycopg[binary]>=3.2,<4.0
+pypdf>=5,<7

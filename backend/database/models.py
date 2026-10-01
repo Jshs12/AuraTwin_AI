@@ -7,9 +7,9 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import (Boolean, CheckConstraint, DateTime, Float, ForeignKey,
-                        ForeignKeyConstraint, Index, Integer, JSON, String,
-                        UniqueConstraint, Uuid, func)
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+                        ForeignKeyConstraint, Index, Integer, JSON, LargeBinary, String, Text,
+                        UniqueConstraint, Uuid, func, text)
+from sqlalchemy.orm import DeclarativeBase, Mapped, deferred, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
@@ -247,3 +247,88 @@ class PointMappingRecord(TimestampMixin, Base):
     mapping_source: Mapped[str | None] = mapped_column(String(40))
 
     device: Mapped[DeviceRecord] = relationship(back_populates="point_mappings")
+
+
+class KnowledgeDocumentRecord(TimestampMixin, Base):
+    """Building-scoped knowledge item; document bytes and chunks are versioned below."""
+
+    __tablename__ = "knowledge_documents"
+    __table_args__ = (
+        ForeignKeyConstraint(["organization_id", "building_id"],
+            ["buildings.organization_id", "buildings.building_id"], ondelete="RESTRICT",
+            name="fk_knowledge_document_org_building"),
+        ForeignKeyConstraint(["building_id", "floor_id"],
+            ["floors.building_id", "floors.floor_id"], ondelete="RESTRICT",
+            name="fk_knowledge_document_building_floor"),
+        ForeignKeyConstraint(["floor_id", "zone_id"],
+            ["zones.floor_id", "zones.zone_id"], ondelete="RESTRICT",
+            name="fk_knowledge_document_floor_zone"),
+        CheckConstraint("category IN ('HVAC_MANUAL', 'EQUIPMENT_MANUAL', 'OPERATING_POLICY', 'MAINTENANCE_PROCEDURE', 'BUILDING_GUIDE', 'COMFORT_POLICY', 'SAFETY_POLICY', 'OTHER')", name="ck_knowledge_document_category"),
+        CheckConstraint("ingestion_status IN ('REGISTERED', 'INGESTING', 'READY', 'FAILED')", name="ck_knowledge_document_ingestion_status"),
+        Index("ix_knowledge_documents_building_status", "organization_id", "building_id", "archived_at"),
+    )
+
+    document_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    building_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    floor_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    zone_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    name: Mapped[str] = mapped_column(String(240), nullable=False)
+    category: Mapped[str] = mapped_column(String(40), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(2000))
+    source_reference: Mapped[str | None] = mapped_column(String(500))
+    ingestion_status: Mapped[str] = mapped_column(String(24), nullable=False, default="REGISTERED", server_default="REGISTERED")
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    simulated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+
+    versions: Mapped[list["KnowledgeDocumentVersionRecord"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan", order_by="KnowledgeDocumentVersionRecord.version_number")
+
+
+class KnowledgeDocumentVersionRecord(Base):
+    __tablename__ = "knowledge_document_versions"
+    __table_args__ = (
+        UniqueConstraint("document_id", "version_number", name="uq_knowledge_document_version"),
+        UniqueConstraint("document_id", "content_hash", name="uq_knowledge_document_content_hash"),
+        Index("ix_knowledge_versions_active_ready", "document_id", "is_active", "ingestion_status"),
+        Index("uq_knowledge_one_active_version", "document_id", unique=True,
+              sqlite_where=text("is_active = 1"), postgresql_where=text("is_active = true")),
+        CheckConstraint("ingestion_status IN ('REGISTERED', 'INGESTING', 'READY', 'FAILED')", name="ck_knowledge_version_status"),
+    )
+
+    version_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    document_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("knowledge_documents.document_id", ondelete="CASCADE"), nullable=False)
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    file_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    file_format: Mapped[str] = mapped_column(String(16), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    original_content: Mapped[bytes] = deferred(mapped_column(LargeBinary, nullable=False))
+    ingestion_status: Mapped[str] = mapped_column(String(24), nullable=False, default="REGISTERED", server_default="REGISTERED")
+    ingestion_error_code: Mapped[str | None] = mapped_column(String(80))
+    page_count: Mapped[int | None] = mapped_column(Integer)
+    provenance: Mapped[str] = mapped_column(String(80), nullable=False, default="LOCAL_EXTRACTOR", server_default="LOCAL_EXTRACTOR")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    document: Mapped[KnowledgeDocumentRecord] = relationship(back_populates="versions")
+    chunks: Mapped[list["KnowledgeChunkRecord"]] = relationship(
+        back_populates="version", cascade="all, delete-orphan", order_by="KnowledgeChunkRecord.sequence_number")
+
+
+class KnowledgeChunkRecord(Base):
+    __tablename__ = "knowledge_chunks"
+    __table_args__ = (
+        UniqueConstraint("version_id", "sequence_number", name="uq_knowledge_chunk_sequence"),
+        Index("ix_knowledge_chunks_version", "version_id", "sequence_number"),
+    )
+
+    chunk_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    version_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("knowledge_document_versions.version_id", ondelete="CASCADE"), nullable=False)
+    sequence_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    page_number: Mapped[int | None] = mapped_column(Integer)
+    section: Mapped[str | None] = mapped_column(String(500))
+    embedding: Mapped[list[float] | None] = mapped_column(JSON)
+    embedding_provider: Mapped[str] = mapped_column(String(80), nullable=False, default="development_hashing_not_semantic", server_default="development_hashing_not_semantic")
+
+    version: Mapped[KnowledgeDocumentVersionRecord] = relationship(back_populates="chunks")

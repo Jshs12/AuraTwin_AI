@@ -18,8 +18,9 @@ import { AuditPanel } from "../components/security/AuditPanel";
 import { api } from "../services/api";
 import { IntegrationConfiguration } from "../components/integrations/IntegrationConfiguration";
 import { BuildingOnboarding } from "../components/integrations/BuildingOnboarding";
+import { KnowledgePanel } from "../components/knowledge/KnowledgePanel";
 
-type Section = "Overview" | "Zones" | "Occupancy" | "Energy" | "Events" | "Integrations" | "Access" | "Audit";
+type Section = "Overview" | "Zones" | "Occupancy" | "Energy" | "Knowledge" | "Events" | "Integrations" | "Access" | "Audit";
 
 export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
   const [activeSection, setActiveSection] = useState<Section>("Overview");
@@ -184,6 +185,7 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
             )}
           </div>
         )}
+        {activeSection === "Knowledge" && <KnowledgePanel key={selectedBuildingId ?? "no-building"} buildingId={selectedBuildingId} canManage={role === "OPERATOR"} />}
         {activeSection === "Access" && <AccessPanel role={role} />}
         {activeSection === "Integrations" && role === "OPERATOR" && <>
           <BuildingOnboarding buildingId={selectedBuildingId} onSelectBuilding={setSelectedBuildingId} onBuildingsChanged={refreshBuildings} />
