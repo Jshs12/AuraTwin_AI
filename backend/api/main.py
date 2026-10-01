@@ -70,6 +70,9 @@ from backend.database.config import DatabaseSettings
 from backend.database.runtime import initialize_local_demo_database
 from backend.database.repositories import SQLAlchemyUserRepository, SQLAlchemyOrganizationRepository
 from backend.database.configuration import SQLAlchemyConfigurationRepository
+from backend.telemetry.repository import SQLAlchemyTelemetryRepository
+from backend.telemetry.service import TelemetryPersistenceService
+from datetime import datetime
 from backend.api.configuration import router as configuration_router
 
 # Configuration/auth records are persistent. Live ZoneState, telemetry and events
@@ -78,6 +81,9 @@ from backend.api.configuration import router as configuration_router
 database_engine, database_sessions = initialize_local_demo_database(DatabaseSettings.from_environment())
 configuration_repository = SQLAlchemyConfigurationRepository(database_sessions)
 organization_repository = SQLAlchemyOrganizationRepository(database_sessions)
+telemetry_service = TelemetryPersistenceService(
+    SQLAlchemyTelemetryRepository(database_sessions), configuration_repository,
+)
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
@@ -201,7 +207,8 @@ app.state.occupancy_provider_ready = (
 
 # Instantiate services
 zone_state_service = ZoneStateService(occ_prov, temp_prov, energy_prov, control_prov,
-                                      configuration_repository=configuration_repository)
+                                      configuration_repository=configuration_repository,
+                                      telemetry_service=telemetry_service)
 control_service = ControlService(control_prov, state_provider=zone_state_service.get_zone_state,
                                  control_states=ZoneControlStateService(initially_enabled=False))
 optimizer = OptimizationEngine()
@@ -212,6 +219,7 @@ app.state.energy_stream_provider = MockEnergyStreamProvider(tariff_prov, EventBr
 app.state.monitoring_scheduler = ZoneMonitoringScheduler(zone_state_service, recommendation_workflow, control_service, occ_prov)
 app.state.demo_scenario = DemoScenarioEngine()
 app.state.zone_state_service = zone_state_service
+app.state.telemetry_service = telemetry_service
 
 app.include_router(monitoring.router, prefix="/api/monitoring")
 app.include_router(configuration_router, prefix="/api")
@@ -562,6 +570,61 @@ async def get_zone(zone_id: str, _user=Depends(require_zone_permission(Permissio
     if zone is not None:
         return zone
     raise HTTPException(status_code=404, detail="Zone not found")
+
+
+def _telemetry_range(start_at: datetime | None, end_at: datetime | None):
+    for value in (start_at, end_at):
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise HTTPException(status_code=422, detail="Telemetry time filters must include a timezone.")
+    if start_at is not None and end_at is not None and start_at > end_at:
+        raise HTTPException(status_code=422, detail="start_at must not be after end_at.")
+
+
+def _telemetry_payload(rows):
+    return {"observations": [row.model_dump(mode="json") for row in rows]}
+
+
+@app.get("/api/buildings/{building_id}/telemetry")
+async def get_building_telemetry(building_id: str, request: Request,
+        start_at: datetime | None = None, end_at: datetime | None = None,
+        limit: int = 500, user=Depends(require_permission(Permission.ZONES_READ))):
+    _telemetry_range(start_at, end_at)
+    if not 1 <= limit <= 1000:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 1000.")
+    building = configuration_repository.get_building(building_id)
+    if building is None:
+        raise HTTPException(status_code=404, detail="Building not found")
+    from backend.security.dependencies import require_building_access
+    require_building_access(building["building_id"], user, request)
+    return _telemetry_payload(telemetry_service.list_building(
+        organization_id=building["organization_id"], building_id=building["building_id"],
+        start_at=start_at, end_at=end_at, limit=limit))
+
+
+@app.get("/api/zones/{zone_id}/telemetry")
+async def get_zone_telemetry(zone_id: str, start_at: datetime | None = None,
+        end_at: datetime | None = None, limit: int = 500,
+        _user=Depends(require_zone_permission(Permission.ZONES_READ))):
+    _telemetry_range(start_at, end_at)
+    if not 1 <= limit <= 1000:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 1000.")
+    scope = configuration_repository.telemetry_scope(zone_id)
+    if scope is None:
+        raise HTTPException(status_code=404, detail="Zone not found")
+    return _telemetry_payload(telemetry_service.list_zone(
+        organization_id=scope["organization_id"], building_id=scope["building_id"],
+        zone_id=scope["database_zone_id"], start_at=start_at, end_at=end_at, limit=limit))
+
+
+@app.get("/api/zones/{zone_id}/telemetry/latest")
+async def get_latest_zone_telemetry(zone_id: str,
+        _user=Depends(require_zone_permission(Permission.ZONES_READ))):
+    scope = configuration_repository.telemetry_scope(zone_id)
+    if scope is None:
+        raise HTTPException(status_code=404, detail="Zone not found")
+    return _telemetry_payload(telemetry_service.list_zone(
+        organization_id=scope["organization_id"], building_id=scope["building_id"],
+        zone_id=scope["database_zone_id"], limit=1))
 
 
 @app.get("/api/zones/{zone_id}/state")

@@ -316,6 +316,20 @@ class SQLAlchemyConfigurationRepository:
         config = self.resolve_zone(identifier, include_archived=include_archived)
         return config.api_dict() if config else None
 
+    def telemetry_scope(self, identifier: str) -> dict[str, str] | None:
+        """Resolve authoritative tenant lineage; callers never submit tenant IDs."""
+        zone_config = self.resolve_zone(identifier)
+        if zone_config is None:
+            return None
+        with self.sessions() as session:
+            building = self._building(session, zone_config.building_id)
+            if building is None:
+                return None
+            return {"organization_id": str(building.organization_id),
+                    "building_id": str(building.building_id),
+                    "floor_id": zone_config.floor_id,
+                    "database_zone_id": zone_config.database_zone_id}
+
     def get_floor_for_zone(self, identifier: str) -> dict | None:
         config = self.resolve_zone(identifier)
         return self.get_floor(config.floor_id) if config else None

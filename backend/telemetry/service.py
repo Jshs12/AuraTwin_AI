@@ -1,0 +1,111 @@
+"""Maps privacy-minimized ZoneState observations into the persistence port."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+
+from backend.core.events import EventTrace
+from backend.schemas.state import ZoneState
+from backend.schemas.telemetry import TelemetryObservation, TelemetrySignal
+from backend.telemetry.repository import TelemetryRepository
+
+
+@dataclass(frozen=True)
+class TelemetryRetentionPolicy:
+    days: int | None = None
+
+    @classmethod
+    def from_environment(cls, environ: dict[str, str] | None = None):
+        values = os.environ if environ is None else environ
+        raw = values.get("TELEMETRY_RETENTION_DAYS")
+        if raw is None or not raw.strip():
+            return cls(days=None)
+        try:
+            days = int(raw)
+        except ValueError:
+            raise ValueError("TELEMETRY_RETENTION_DAYS must be a positive integer when configured.") from None
+        if days <= 0:
+            raise ValueError("TELEMETRY_RETENTION_DAYS must be a positive integer when configured.")
+        return cls(days=days)
+
+    def cutoff(self, *, now: datetime) -> datetime | None:
+        if self.days is None:
+            return None
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("Retention reference time must be timezone-aware.")
+        return now.astimezone(timezone.utc) - timedelta(days=self.days)
+
+
+class TelemetryPersistenceService:
+    def __init__(self, repository: TelemetryRepository, configuration_repository,
+                 retention: TelemetryRetentionPolicy | None = None):
+        self.repository = repository
+        self.configuration_repository = configuration_repository
+        self.retention = retention or TelemetryRetentionPolicy.from_environment()
+
+    def persist_zone_state(self, state: ZoneState) -> int:
+        try:
+            scope = self.configuration_repository.telemetry_scope(state.zone.zone_id)
+        except Exception as exc:
+            EventTrace.log_event("TELEMETRY_PERSISTENCE_FAILED", state.zone.zone_id,
+                "telemetry_persistence", {"error_type": type(exc).__name__}, status="FAILED")
+            return 0
+        if scope is None:
+            return 0
+        quality = state.data_quality.signals
+        candidates = (
+            (TelemetrySignal.OCCUPANCY, state.occupancy.people_count, "people",
+             state.occupancy.observed_at, state.occupancy.source, state.occupancy.simulated, "occupancy"),
+            (TelemetrySignal.TEMPERATURE, state.temperature, "°C",
+             state.temperature_observed_at, state.temperature_source,
+             state.temperature_simulated, "temperature"),
+            (TelemetrySignal.POWER, state.energy.power_kw, "kW",
+             state.energy.observed_at, state.energy.source, state.energy.is_simulated, "energy_power"),
+            (TelemetrySignal.ENERGY, state.energy.energy_kwh, "kWh",
+             state.energy.observed_at, state.energy.source, state.energy.is_simulated, "energy"),
+            (TelemetrySignal.COST, state.energy.cost, state.energy.tariff.currency,
+             state.energy.observed_at, state.energy.source, state.energy.is_simulated, "energy_cost"),
+            (TelemetrySignal.TARIFF_RATE, state.tariff.rate_per_kwh,
+             f"{state.tariff.currency}/kWh", state.tariff.observed_at,
+             state.tariff.source, state.tariff.simulated, "tariff"),
+        )
+        observations = []
+        for signal, value, unit, observed_at, source, simulated, quality_name in candidates:
+            # A snapshot/generated timestamp is not evidence of observation time.
+            if observed_at is None:
+                continue
+            assessment = quality.get(quality_name)
+            observations.append(TelemetryObservation(
+                organization_id=scope["organization_id"], building_id=scope["building_id"],
+                floor_id=scope["floor_id"], zone_id=scope["database_zone_id"],
+                signal=signal, value=float(value), unit=unit, observed_at=observed_at,
+                source=None if not source or source == "unknown" else source,
+                quality_state=assessment.state.value if assessment is not None else None,
+                simulated=bool(simulated) if simulated is not None else None,
+            ))
+        try:
+            return self.repository.add_many(observations)
+        except Exception as exc:
+            # Persistence is observational only; the existing quality and safety
+            # gates remain in the decision path. Do not leak database details.
+            EventTrace.log_event("TELEMETRY_PERSISTENCE_FAILED", state.zone.zone_id,
+                "telemetry_persistence", {"error_type": type(exc).__name__}, status="FAILED")
+            return 0
+
+    def list_zone(self, *, organization_id: str, building_id: str, zone_id: str,
+                  start_at: datetime | None = None, end_at: datetime | None = None,
+                  limit: int = 500):
+        return self.repository.list_zone(organization_id=organization_id, building_id=building_id,
+            zone_id=zone_id, start_at=start_at, end_at=end_at, limit=limit)
+
+    def list_building(self, *, organization_id: str, building_id: str,
+                      start_at: datetime | None = None, end_at: datetime | None = None,
+                      limit: int = 500):
+        return self.repository.list_building(organization_id=organization_id, building_id=building_id,
+            start_at=start_at, end_at=end_at, limit=limit)
+
+    def cleanup_expired(self, *, now: datetime) -> int:
+        cutoff = self.retention.cutoff(now=now)
+        return self.repository.delete_before(cutoff) if cutoff is not None else 0

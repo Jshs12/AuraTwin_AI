@@ -6,8 +6,9 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import (Boolean, CheckConstraint, DateTime, Float, ForeignKey, Integer,
-                        JSON, String, UniqueConstraint, Uuid, func)
+from sqlalchemy import (Boolean, CheckConstraint, DateTime, Float, ForeignKey,
+                        ForeignKeyConstraint, Index, Integer, JSON, String,
+                        UniqueConstraint, Uuid, func)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -61,6 +62,7 @@ class BuildingRecord(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("organization_id", "slug", name="uq_buildings_org_slug"),
         UniqueConstraint("building_key", name="uq_buildings_building_key"),
+        UniqueConstraint("organization_id", "building_id", name="uq_buildings_org_id"),
     )
 
     building_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
@@ -107,7 +109,8 @@ class OrganizationMembershipRecord(TimestampMixin, Base):
 
 class FloorRecord(TimestampMixin, Base):
     __tablename__ = "floors"
-    __table_args__ = (UniqueConstraint("building_id", "floor_key", name="uq_floors_building_key"),)
+    __table_args__ = (UniqueConstraint("building_id", "floor_key", name="uq_floors_building_key"),
+                      UniqueConstraint("building_id", "floor_id", name="uq_floors_building_id"))
 
     floor_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     building_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("buildings.building_id", ondelete="CASCADE"), nullable=False, index=True)
@@ -125,6 +128,7 @@ class ZoneRecord(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("floor_id", "zone_key", name="uq_zones_floor_key"),
         UniqueConstraint("legacy_zone_id", name="uq_zones_legacy_id"),
+        UniqueConstraint("floor_id", "zone_id", name="uq_zones_floor_id"),
         CheckConstraint("capacity >= 0", name="ck_zones_capacity_nonnegative"),
         CheckConstraint("area_m2 >= 0", name="ck_zones_area_nonnegative"),
         CheckConstraint("comfort_min_c < comfort_max_c", name="ck_zones_comfort_order"),
@@ -144,6 +148,43 @@ class ZoneRecord(TimestampMixin, Base):
 
     floor: Mapped[FloorRecord] = relationship(back_populates="zones")
     devices: Mapped[list["DeviceRecord"]] = relationship(back_populates="zone")
+
+
+class TelemetryObservationRecord(Base):
+    """Privacy-minimized, tenant-scoped signal observation history."""
+
+    __tablename__ = "telemetry_observations"
+    __table_args__ = (
+        ForeignKeyConstraint(["organization_id", "building_id"],
+            ["buildings.organization_id", "buildings.building_id"], ondelete="RESTRICT",
+            name="fk_telemetry_org_building"),
+        ForeignKeyConstraint(["building_id", "floor_id"],
+            ["floors.building_id", "floors.floor_id"], ondelete="RESTRICT",
+            name="fk_telemetry_building_floor"),
+        ForeignKeyConstraint(["floor_id", "zone_id"],
+            ["zones.floor_id", "zones.zone_id"], ondelete="RESTRICT",
+            name="fk_telemetry_floor_zone"),
+        UniqueConstraint("idempotency_key", name="uq_telemetry_idempotency_key"),
+        Index("ix_telemetry_org_building_zone_time", "organization_id", "building_id", "zone_id", "observed_at"),
+        Index("ix_telemetry_building_time", "building_id", "observed_at"),
+        Index("ix_telemetry_zone_signal_time", "zone_id", "signal", "observed_at"),
+        CheckConstraint("signal IN ('occupancy', 'temperature', 'power', 'energy', 'cost', 'tariff_rate')", name="ck_telemetry_signal"),
+    )
+
+    observation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    building_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    floor_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    zone_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    signal: Mapped[str] = mapped_column(String(32), nullable=False)
+    value: Mapped[float] = mapped_column(Float(precision=53), nullable=False)
+    unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    source: Mapped[str | None] = mapped_column(String(160))
+    quality_state: Mapped[str | None] = mapped_column(String(24))
+    simulated: Mapped[bool | None] = mapped_column(Boolean)
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
 class IntegrationRecord(TimestampMixin, Base):

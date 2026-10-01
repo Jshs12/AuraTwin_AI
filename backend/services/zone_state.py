@@ -15,6 +15,7 @@ class ZoneStateService:
         control_provider: BuildingControlProvider,
         data_quality_gate: DataQualityGate | None = None,
         configuration_repository=None,
+        telemetry_service=None,
     ):
         self.occupancy_provider = occupancy_provider
         self.temperature_provider = temperature_provider
@@ -22,6 +23,7 @@ class ZoneStateService:
         self.control_provider = control_provider
         self.data_quality_gate = data_quality_gate or DataQualityGate()
         self.configuration_repository = configuration_repository
+        self.telemetry_service = telemetry_service
         self.zone_configurations = []
         self._zones = self.refresh_configuration()
         
@@ -117,6 +119,8 @@ class ZoneStateService:
             temperature_simulated=temperature_simulated,
         )
         state.data_quality = self.data_quality_gate.assess_zone_state(state)
+        if self.telemetry_service is not None:
+            self.telemetry_service.persist_zone_state(state)
         
         EventTrace.log_event("STATE_EVALUATED", zone_id, "zone_state_service", {"temperature": temp, "setpoint": hvac.present_value})
         return state
