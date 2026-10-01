@@ -138,9 +138,10 @@ class DataQualityGate:
                 source=state.tariff.source, observation_timestamp=state.tariff.observed_at,
                 simulated=state.tariff.simulated, numeric=True, minimum=0),
             "hvac_setpoint": self.assess("setpoint", state.hvac_status.present_value,
-                source=state.hvac_status.provider,
+                source=state.hvac_status.setpoint_source or state.hvac_status.provider,
                 observation_timestamp=(state.hvac_status.setpoint_observed_at or state.hvac_status.observed_at),
-                simulated=state.hvac_status.simulated, numeric=True),
+                simulated=(state.hvac_status.setpoint_simulated if state.hvac_status.setpoint_simulated is not None
+                           else state.hvac_status.simulated), numeric=True),
         }
         if occ.occupancy_state == "UNKNOWN" and occ.capacity == 0 and occ.observed_at is None:
             assessments["occupancy"] = assessments["occupancy"].model_copy(update={

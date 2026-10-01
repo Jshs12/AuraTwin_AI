@@ -233,3 +233,21 @@ def test_control_reenable_requires_fresh_data_and_audits_rejection(monkeypatch):
     assert modes.snapshot(zone_id).control_enabled is False
     assert any(row.action == "control_enable_rejected" and row.success is False
                for row in app.state.audit_service.list_records())
+
+
+def test_incomplete_command_policy_returns_structured_safe_configuration_names(monkeypatch):
+    from backend.api.main import control_service
+
+    for name in ("COMMAND_LIMIT_MIN_SETPOINT", "COMMAND_LIMIT_MAX_SETPOINT", "COMMAND_LIMIT_MAX_DELTA"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(control_service.safety, "min_setpoint", None)
+    monkeypatch.setattr(control_service.safety, "max_setpoint", None)
+    monkeypatch.setattr(control_service.safety, "max_setpoint_delta", None)
+    monkeypatch.setattr(control_service.data_quality, "critical_failures", lambda report: {})
+    response = make_client().post("/api/zones/classroom_01/control-enabled", json={"enabled": True})
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "COMMAND_POLICY_INCOMPLETE"
+    assert set(detail["missing_configuration"]) == {
+        "COMMAND_LIMIT_MIN_SETPOINT", "COMMAND_LIMIT_MAX_SETPOINT", "COMMAND_LIMIT_MAX_DELTA"}
+    assert "16" not in response.text and "30" not in response.text

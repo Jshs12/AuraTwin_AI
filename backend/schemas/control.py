@@ -53,6 +53,8 @@ class BuildingControlState(BaseModel):
     # provider says the represented state last changed or was measured.
     observed_at: Optional[datetime] = None
     setpoint_observed_at: Optional[datetime] = None
+    setpoint_source: Optional[str] = None
+    setpoint_simulated: Optional[bool] = None
     simulated: bool = False
 
 

@@ -20,6 +20,7 @@ interface MonitoringState {
   events: SystemEvent[];
   energyHistory: EnergyDataPoint[];
   connected: boolean;
+  connectionStatus: "connecting" | "connected" | "disconnected" | "authentication-required" | "authorization-denied";
   currentZoneIndex: number;
 }
 
@@ -33,11 +34,14 @@ export function useMonitoring() {
     events: [],
     energyHistory: [],
     connected: false,
+    connectionStatus: authSession.getToken() ? "connecting" : "authentication-required",
     currentZoneIndex: 0,
   });
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttempt = useRef(0);
   const mountedRef = useRef(true);
 
   const fetchStatus = useCallback(async () => {
@@ -64,24 +68,34 @@ export function useMonitoring() {
   }, []);
 
   const connectWebSocket = useCallback(() => {
+    if (connectTimer.current) clearTimeout(connectTimer.current);
+    if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null; }
     const readyState = wsRef.current?.readyState;
     if (readyState === WebSocket.CONNECTING || readyState === WebSocket.OPEN) return;
 
     const token = authSession.getToken();
-    if (!token) return;
-    const ws = new WebSocket(`${WS_BASE}/api/monitoring/ws/events?access_token=${encodeURIComponent(token)}`);
-    wsRef.current = ws;
+    if (!token) {
+      if (mountedRef.current) setState(prev => ({ ...prev, connected: false, connectionStatus: "authentication-required" }));
+      return;
+    }
+    if (mountedRef.current) setState(prev => ({ ...prev, connected: false, connectionStatus: "connecting" }));
+    // StrictMode deliberately replays effects in development. Deferring socket
+    // creation lets the discarded first mount cancel before a handshake begins.
+    connectTimer.current = setTimeout(() => {
+      if (!mountedRef.current || authSession.getToken() !== token) return;
+      const ws = new WebSocket(`${WS_BASE}/api/monitoring/ws/events?access_token=${encodeURIComponent(token)}`);
+      wsRef.current = ws;
+      ws.onopen = () => {
+        if (wsRef.current !== ws) { ws.close(1000, "component unmounted"); return; }
+        reconnectAttempt.current = 0;
+        if (mountedRef.current) setState(prev => ({ ...prev, connected: true, connectionStatus: "connected" }));
+      };
 
-    ws.onopen = () => {
-      if (wsRef.current !== ws) return;
-      if (mountedRef.current) setState(prev => ({ ...prev, connected: true }));
-    };
-
-    ws.onmessage = (event) => {
-      if (wsRef.current !== ws) return;
-      try {
-        const msg: SystemEvent = JSON.parse(event.data);
-        if (!mountedRef.current) return;
+      ws.onmessage = (event) => {
+        if (wsRef.current !== ws) return;
+        try {
+          const msg: SystemEvent = JSON.parse(event.data);
+          if (!mountedRef.current) return;
 
         setState(prev => {
           const newEvents = prev.events.some(existing => existing.event_id === msg.event_id)
@@ -112,26 +126,36 @@ export function useMonitoring() {
         if (["SNAPSHOT_CAPTURED", "YOLO_DETECTION", "OCCUPANCY_CHANGED"].includes(msg.event_type)) {
           fetchStatus();
         }
-      } catch {
-        // ignore parse errors
-      }
-    };
+        } catch {
+          // Ignore malformed event frames; keep the authenticated stream alive.
+        }
+      };
 
-    ws.onclose = () => {
-      if (wsRef.current !== ws) return;
-      wsRef.current = null;
-      if (!mountedRef.current) return;
-      setState(prev => ({ ...prev, connected: false }));
-      // Reconnect after 3s
-      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-      reconnectTimer.current = setTimeout(() => {
-        if (mountedRef.current) connectWebSocket();
-      }, 3000);
-    };
+      ws.onclose = (event) => {
+        if (wsRef.current !== ws) return;
+        wsRef.current = null;
+        if (!mountedRef.current) return;
+        setState(prev => ({ ...prev, connected: false,
+          connectionStatus: event.code === 4401 ? "authentication-required"
+            : event.code === 4403 ? "authorization-denied" : "disconnected" }));
+        if (event.code === 4401) {
+          authSession.clear();
+          window.dispatchEvent(new Event("auratwin:session-expired"));
+          return;
+        }
+        if (event.code === 4403 || event.code === 1000) return;
+        if (reconnectAttempt.current >= 5) return;
+        reconnectAttempt.current += 1;
+        const delay = Math.min(1000 * (2 ** (reconnectAttempt.current - 1)), 16000);
+        reconnectTimer.current = setTimeout(() => {
+          if (mountedRef.current) connectWebSocket();
+        }, delay);
+      };
 
-    ws.onerror = () => {
-      if (wsRef.current === ws) ws.close();
-    };
+      ws.onerror = () => {
+        // onclose carries the retry/auth code and is the single reconnect path.
+      };
+    }, 0);
   }, [fetchStatus]);
 
   const startMonitoring = useCallback(async () => {
@@ -156,10 +180,13 @@ export function useMonitoring() {
     return () => {
       mountedRef.current = false;
       clearInterval(poll);
+      if (connectTimer.current) clearTimeout(connectTimer.current);
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       const ws = wsRef.current;
       wsRef.current = null;
-      ws?.close();
+      if (ws?.readyState === WebSocket.OPEN) ws.close(1000, "dashboard unmounted");
+      // Closing CONNECTING sockets emits a misleading browser console error.
+      // Let that handshake settle and close it immediately on open instead.
     };
   }, [fetchStatus, connectWebSocket]);
 
@@ -185,6 +212,7 @@ export function useMonitoring() {
     events: state.events,
     energyHistory: state.energyHistory,
     connected: state.connected,
+    connectionStatus: state.connectionStatus,
     totalOccupancy,
     occupiedZones,
     currentPower,
@@ -193,5 +221,6 @@ export function useMonitoring() {
     startMonitoring,
     stopMonitoring,
     refreshStatus: fetchStatus,
+    reconnectWebSocket: connectWebSocket,
   };
 }

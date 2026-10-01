@@ -88,6 +88,8 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
               status={monitoring.status}
               error={monitoring.error}
               connected={monitoring.connected}
+              connectionStatus={monitoring.connectionStatus}
+              onReconnect={monitoring.reconnectWebSocket}
               onStart={monitoring.startMonitoring}
               onStop={monitoring.stopMonitoring}
               canManage={role === "OPERATOR"}
@@ -135,6 +137,8 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
               status={monitoring.status}
               error={monitoring.error}
               connected={monitoring.connected}
+              connectionStatus={monitoring.connectionStatus}
+              onReconnect={monitoring.reconnectWebSocket}
               onStart={monitoring.startMonitoring}
               onStop={monitoring.stopMonitoring}
               canManage={role === "OPERATOR"}
@@ -163,7 +167,7 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
         {/* ── EVENTS ───────────────────────────────────────────── */}
         {activeSection === "Events" && (
           <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
-            <EventStream events={monitoring.events} />
+            <EventStream events={monitoring.events} connectionStatus={monitoring.connectionStatus} />
             {selectedZoneId && (
               <div style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
                 Zone-specific history: select a zone from the Zones tab.

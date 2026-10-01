@@ -3,11 +3,11 @@ import { useZoneState } from "../../hooks/useZoneState";
 import { Card, OccupancyBadge, Button } from "../common";
 import { Timeline } from "../events/Timeline";
 import { CVPanel } from "../occupancy/CVPanel";
-import { api } from "../../services/api";
+import { api, ApiRequestError } from "../../services/api";
 
 export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: string | null; demoPhase?: string | null; canOperate?: boolean }) {
   const [modeBusy, setModeBusy] = useState(false);
-  const [modeError, setModeError] = useState<string | null>(null);
+  const [modeError, setModeError] = useState<ApiRequestError | Error | null>(null);
   const {
     state,
     history,
@@ -53,8 +53,8 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
     try {
       await action();
       await refresh();
-    } catch (err: any) {
-      setModeError(err.message || "Unable to update control state");
+    } catch (err) {
+      setModeError(err instanceof Error ? err : new Error("Unable to update control state"));
     } finally {
       setModeBusy(false);
     }
@@ -77,8 +77,8 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
         {/* Occupancy */}
         <div className="section-block">
           <div className="card-title">ACTIVE OCCUPANCY SOURCE</div>
-          <div style={{ marginBottom: "0.35rem" }}><span className="badge warning">{state.occupancy_source === "demo_scenario_simulation" ? "DEMO SIMULATION" : state.occupancy_source === "yolo" ? "COMPUTER VISION · YOLO" : `OCCUPANCY PROVIDER · ${(state.occupancy_source ?? "unknown").toUpperCase()}`}</span></div>
-          <div style={{ fontSize: "0.72rem", color: "var(--text-muted)", marginBottom: "0.5rem" }}>Source: {state.occupancy_source === "demo_scenario_simulation" ? `Deterministic scenario input${demoPhase ? ` · ${demoPhase}` : ""}` : "Uploaded image inference provider"}</div>
+            <div style={{ marginBottom: "0.35rem" }}><span className="badge warning">{state.occupancy_source === "demo_scenario_simulation" ? "DEMO SIMULATION" : state.occupancy_source === "yolo" ? "COMPUTER VISION · YOLO" : `OCCUPANCY PROVIDER · ${(state.occupancy_source ?? "unknown").toUpperCase()}`}</span></div>
+          <div style={{ fontSize: "0.72rem", color: "var(--text-muted)", marginBottom: "0.5rem" }}>Source: {state.occupancy.source ?? state.occupancy_source ?? "unknown"} · {state.occupancy.simulated ? "SIMULATED" : "provider reported"}{state.data_quality?.signals.occupancy ? ` · quality ${state.data_quality.signals.occupancy.state}` : ""}{state.occupancy_source === "demo_scenario_simulation" && demoPhase ? ` · ${demoPhase}` : ""}</div>
           <div className="zone-stats">
             <div>
                 <div className="stat-label">{state.occupancy_source === "demo_scenario_simulation" ? "Current occupants" : "Detected people"}</div>
@@ -102,12 +102,17 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
               <div className="stat-label">Current Temp</div>
               <div className="stat-value">{temperature.toFixed(1)}°C</div>
               <div style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
+                Source: {state.temperature_source ?? "unknown"} · {state.temperature_simulated ? "SIMULATED" : "provider reported"}
+                {state.data_quality?.signals.temperature ? ` · quality ${state.data_quality.signals.temperature.state}` : ""}
+              </div>
+              <div style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
                 Comfort: {zone.comfort.min_temperature}°–{zone.comfort.max_temperature}°
               </div>
             </div>
             <div>
               <div className="stat-label">HVAC Setpoint</div>
               <div className="stat-value">{hvac_status.present_value.toFixed(1)}°C</div>
+              <div style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>{hvac_status.setpoint_source ?? hvac_status.provider} · {(hvac_status.setpoint_simulated ?? hvac_status.simulated) ? "SIMULATED" : "provider reported"}{state.data_quality?.signals.hvac_setpoint ? ` · quality ${state.data_quality.signals.hvac_setpoint.state}` : ""}</div>
               <div style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>{hvac_status.object_id}</div>
             </div>
           </div>
@@ -173,7 +178,15 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
           <div style={{ fontSize: "0.7rem", color: "var(--text-muted)", marginTop: "0.35rem" }}>
             Manual override pauses AuraTwin commands; it does not send a manual HVAC setpoint.
           </div>
-          {modeError && <div className="demo-error" role="alert" style={{ marginTop: "0.5rem" }}>{modeError}</div>}
+          {modeError && <div className="demo-error" role="alert" style={{ marginTop: "0.5rem" }}>
+            {modeError instanceof ApiRequestError && modeError.code === "COMMAND_POLICY_INCOMPLETE" ? <>
+              <strong>CONTROL UNAVAILABLE</strong><br />Safety command-limit policy is incomplete.
+              {!!modeError.missingConfiguration?.length && <><br />Missing configuration: {modeError.missingConfiguration.join(", ")}</>}
+            </> : modeError instanceof ApiRequestError && modeError.code === "COMMAND_POLICY_INVALID" ? <>
+              <strong>CONTROL UNAVAILABLE</strong><br />Safety command-limit policy is invalid.
+              {!!modeError.invalidConfiguration?.length && <><br />Invalid configuration: {modeError.invalidConfiguration.join(", ")}</>}
+            </> : <>{modeError.message}</>}
+          </div>}
           {controlResult && (
             <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.5rem" }}>
               Last command: {controlResult.status} · {controlResult.provider}

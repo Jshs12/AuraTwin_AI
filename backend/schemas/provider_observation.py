@@ -37,3 +37,18 @@ class ObservationIngestionResult(BaseModel):
     quality_state: QualityState | None = None
     reason_code: str | None = None
     runtime_input_applied: bool = False
+
+
+class SimulatedObservationRequest(BaseModel):
+    """Explicit simulated reading; the API supplies mapping identity and simulated provenance."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    observed_at: datetime
+    value: float = Field(strict=True, allow_inf_nan=False)
+
+    @field_validator("observed_at")
+    @classmethod
+    def require_timezone(cls, value: datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Observation timestamp must include a timezone")
+        return value

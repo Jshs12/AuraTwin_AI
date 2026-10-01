@@ -45,6 +45,21 @@ export function IntegrationConfiguration({ buildingId, zones }: { buildingId?: s
       if (selectedDevice) setPoints(await loadPoints(selectedDevice));
     } catch (e) { setError(e instanceof Error ? e.message : "Request failed"); }
   };
+  const simulateObservation = async (point: Point) => {
+    const raw = window.prompt(`SIMULATED observation for ${point.logical_signal}; enter a demo value`);
+    if (raw === null) return;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) { setError("Enter a finite numeric demo value."); return; }
+    setError(""); setNotice("");
+    try {
+      const result = await api.createSimulatedPointObservation(
+        point.point_mapping_id, value, new Date().toISOString());
+      if (selectedDevice) setPoints(await loadPoints(selectedDevice));
+      setNotice(result.runtime_input_applied
+        ? "SIMULATED observation accepted; current ZoneState updated after quality and freshness checks."
+        : `SIMULATED observation persisted as history only${result.reason_code ? ` · ${result.reason_code}` : ""}.`);
+    } catch (e) { setError(e instanceof Error ? e.message : "Simulated observation was rejected"); }
+  };
   const createIntegration = () => {
     const name = window.prompt("Integration name");
     if (!name) return;
@@ -84,6 +99,17 @@ export function IntegrationConfiguration({ buildingId, zones }: { buildingId?: s
     <div className="card">
       <div className="card-title">INTEGRATIONS · CONFIGURATION ONLY</div>
       <p>Building-scoped connection metadata. No network connection or hardware discovery is performed.</p>
+      <div className="section-block" aria-label="Integration onboarding lifecycle">
+        <div className="card-title">ONBOARDING LIFECYCLE</div>
+        <ol style={{ margin: 0, paddingLeft: "1.25rem", display: "grid", gap: ".3rem", color: "var(--text-secondary)" }}>
+          <li>Organization → building → floor → zone: configured in building setup.</li>
+          <li>Integration: configuration metadata only; simulated validation, no connection.</li>
+          <li>Discovery: unavailable; devices must be configured manually.</li>
+          <li>Devices → points → confirmed mapping: available for explicit operator configuration.</li>
+          <li>Observation: caller-entered simulated values only; no real provider reads.</li>
+          <li>Runtime state: occupancy, temperature, and cooling setpoint only after quality/freshness validation; energy signals stay historical.</li>
+        </ol>
+      </div>
       <button onClick={createIntegration}>Add integration</button>
       {integrations.map(item => <div key={item.integration_id} style={{ padding: ".65rem 0", borderBottom: "1px solid var(--border-color)" }}>
         <button onClick={() => { setSelectedIntegration(item.integration_id); setSelectedDevice(""); }}>{item.name}</button>
@@ -112,6 +138,7 @@ export function IntegrationConfiguration({ buildingId, zones }: { buildingId?: s
         <span>{point.external_point_id} → {point.logical_signal} · zone {zones.find(zone => zone.zone_id === point.zone_id)?.name ?? "unassigned"} · {point.mapping_status} · source {point.mapping_source ?? "unknown"}{point.mapping_confidence === null ? "" : ` · confidence ${point.mapping_confidence}`}</span>
         <small>{point.latestObservation ? `Latest: ${String(point.latestObservation.value)} ${String(point.latestObservation.unit)} · ${String(point.latestObservation.quality_state)} · ${point.latestObservation.simulated ? "SIMULATED" : "provider reported"} · ${String(point.latestObservation.source)}` : "No persisted observation"}</small>
         <div style={{ display: "flex", gap: ".5rem" }}>
+        {point.mapping_status === "CONFIRMED" && <button onClick={() => void simulateObservation(point)}>Add simulated observation</button>}
         {point.mapping_status !== "CONFIRMED" && <button onClick={() => void run(() => api.decidePointMapping(point.point_mapping_id, "confirm"))}>Confirm</button>}
         {point.mapping_status !== "REJECTED" && <button onClick={() => void run(() => api.decidePointMapping(point.point_mapping_id, "reject"))}>Reject</button>}
         </div>

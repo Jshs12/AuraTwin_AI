@@ -3,6 +3,7 @@ import { formatISTTimestamp } from "../../utils/time";
 
 interface EventStreamProps {
   events: SystemEvent[];
+  connectionStatus?: string;
 }
 
 const eventColors: Record<string, string> = {
@@ -61,11 +62,13 @@ function getPayloadSummary(event: SystemEvent): string {
   return Object.entries(p).slice(0, 2).map(([k, v]) => `${k}: ${v}`).join(" · ");
 }
 
-export function EventStream({ events }: EventStreamProps) {
+export function EventStream({ events, connectionStatus = "disconnected" }: EventStreamProps) {
+  const live = connectionStatus === "connected";
   if (events.length === 0) {
     return (
       <div className="card">
         <div className="card-title">LIVE EVENT STREAM</div>
+        <div className={`badge ${live ? "success" : "warning"}`} role="status">EVENT CONNECTION · {connectionStatus.replace(/-/g, " ").toUpperCase()}</div>
         <div style={{ color: "var(--text-muted)", fontSize: "0.85rem", marginTop: "0.5rem", textAlign: "center", padding: "2rem" }}>
           No events yet — start monitoring to see the live stream.
         </div>
@@ -77,7 +80,7 @@ export function EventStream({ events }: EventStreamProps) {
     <div className="card">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
         <div className="card-title" style={{ marginBottom: 0 }}>LIVE EVENT STREAM</div>
-        <span className="badge success" style={{ fontSize: "0.7rem" }}>● LIVE · {events.length} events</span>
+        <span className={`badge ${live ? "success" : "warning"}`} style={{ fontSize: "0.7rem" }}>● {live ? "LIVE" : connectionStatus.replace(/-/g, " ").toUpperCase()} · {events.length} events</span>
       </div>
       <div style={{ maxHeight: 420, overflowY: "auto", display: "flex", flexDirection: "column", gap: "0.3rem" }}>
         {events.map(event => {

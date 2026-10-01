@@ -1,5 +1,7 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, HTTPException, Depends
 from typing import Dict, Any
+import asyncio
+import json
 
 from backend.core.monitoring import ZoneMonitoringScheduler
 from backend.core.mock_providers import MockEnergyStreamProvider
@@ -33,8 +35,14 @@ def get_monitoring_status(request: Request, user=Depends(require_any_permission(
     scenario = getattr(request.app.state, "demo_scenario", None)
     demo_zone_ids = set(getattr(scenario, "ZONES", ()))
     demo_visible = user.role == Role.ADMIN or demo_zone_ids.issubset(allowed_zone_ids)
-    status["demo_simulation"] = bool(demo_visible and scenario and scenario.scenario_id)
-    status["demo_phase"] = scenario.status_payload()["current_phase"] if scenario and demo_visible else None
+    demo_active = bool(demo_visible and scheduler.demo_mode and scenario
+                       and scenario.status.value in {"RUNNING", "PAUSED"})
+    status["demo_simulation"] = demo_active
+    status["demo_phase"] = scenario.status_payload()["current_phase"] if demo_active else None
+    status["monitoring_scope"] = ("DEMO_SCENARIO" if demo_active else
+        "CONFIGURED_BUILDING" if status["running"] else "STOPPED")
+    status["configured_zones_total"] = len(allowed_zone_ids)
+    status["demo_zones_total"] = len(demo_zone_ids.intersection(allowed_zone_ids))
     if status["demo_simulation"]:
         for zone in status["zones"]:
             zone["occupancy_source"] = "DEMO"
@@ -96,41 +104,55 @@ async def websocket_events(websocket: WebSocket):
     if not token:
         await websocket.close(code=4401)
         return
-    try:
-        from backend.security.jwt import decode_access_token
-        claims = decode_access_token(token)
-        user = websocket.app.state.auth_service.users.get_by_id(claims["sub"])
-        if user is None or not user.active or user.role.value != claims["role"]:
-            raise ValueError("invalid user")
-        required = Permission.EVENTS_READ if user.role == Role.ADMIN else Permission.MONITORING_MANAGE
-        if not has_permission(user.role, required):
-            await websocket.close(code=4403)
-            return
-        allowed_zone_ids = {zone.zone_id for zone in websocket.app.state.configuration_repository.zones_for_user(user)}
-        if user.role == Role.OPERATOR and not allowed_zone_ids:
-            await websocket.close(code=4403)
-            return
-    except Exception:
-        await websocket.close(code=4401)
+    async def current_access():
+        try:
+            from backend.security.jwt import decode_access_token
+            claims = decode_access_token(token)
+            current_user = websocket.app.state.auth_service.users.get_by_id(claims["sub"])
+            if current_user is None or not current_user.active or current_user.role.value != claims["role"]:
+                return None, set(), 4401
+            required = Permission.EVENTS_READ if current_user.role == Role.ADMIN else Permission.MONITORING_MANAGE
+            if not has_permission(current_user.role, required):
+                return None, set(), 4403
+            zones = {zone.zone_id for zone in websocket.app.state.configuration_repository.zones_for_user(current_user)}
+            if current_user.role == Role.OPERATOR and not zones:
+                return None, set(), 4403
+            return current_user, zones, None
+        except Exception:
+            return None, set(), 4401
+
+    user, allowed_zone_ids, auth_close_code = await current_access()
+    if auth_close_code is not None:
+        await websocket.close(code=auth_close_code)
         return
     await websocket.accept()
-    
+
     async def send_message(message: str):
-        import json
         try:
             event = json.loads(message)
+            current_user, current_zones, close_code = await current_access()
+            if close_code is not None:
+                await websocket.close(code=close_code)
+                raise RuntimeError("WebSocket authorization expired")
             # Building-wide/unknown events are never exposed to scoped operators.
-            if user.role == Role.OPERATOR and event.get("zone_id") not in allowed_zone_ids:
+            if current_user.role == Role.OPERATOR and event.get("zone_id") not in current_zones:
                 return
             await websocket.send_text(message)
-        except Exception:
-            return
-        
+        except RuntimeError:
+            raise
+
     EventBroadcaster.subscribe(send_message)
     try:
         while True:
-            # Keep connection open
-            data = await websocket.receive_text()
+            try:
+                await asyncio.wait_for(websocket.receive_text(), timeout=15)
+            except asyncio.TimeoutError:
+                # Recheck JWT expiry, account status and current building scope
+                # even when the event stream is idle.
+                _, _, close_code = await current_access()
+                if close_code is not None:
+                    await websocket.close(code=close_code)
+                    break
     except WebSocketDisconnect:
         pass
     finally:

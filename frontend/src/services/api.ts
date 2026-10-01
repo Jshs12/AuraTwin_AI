@@ -19,6 +19,30 @@ import type {
 export const API_BASE = `${window.location.protocol}//${window.location.hostname}:8000/api`;
 const TOKEN_KEY = "auratwin_access_token";
 
+export class ApiRequestError extends Error {
+  code?: string;
+  missingConfiguration?: string[];
+  invalidConfiguration?: string[];
+  constructor(message: string, detail?: Record<string, unknown>) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.code = typeof detail?.code === "string" ? detail.code : undefined;
+    this.missingConfiguration = Array.isArray(detail?.missing_configuration)
+      ? detail.missing_configuration.filter((item): item is string => typeof item === "string") : undefined;
+    this.invalidConfiguration = Array.isArray(detail?.invalid_configuration)
+      ? detail.invalid_configuration.filter((item): item is string => typeof item === "string") : undefined;
+  }
+}
+
+async function throwApiError(response: Response, fallback: string): Promise<never> {
+  const body = await response.json().catch(() => ({}));
+  const detail = body?.detail;
+  if (detail && typeof detail === "object") {
+    throw new ApiRequestError(typeof detail.message === "string" ? detail.message : fallback, detail);
+  }
+  throw new ApiRequestError(typeof detail === "string" ? detail : fallback);
+}
+
 export const authSession = {
   getToken: () => sessionStorage.getItem(TOKEN_KEY),
   setToken: (token: string) => sessionStorage.setItem(TOKEN_KEY, token),
@@ -153,6 +177,14 @@ export const api = {
     if (!res.ok) throw new Error("Unable to load latest mapped observation");
     return (await res.json()).observation as Record<string, unknown> | null;
   },
+  async createSimulatedPointObservation(pointId: string, value: number, observedAt: string) {
+    const res = await authFetch(`${API_BASE}/point-mappings/${encodeURIComponent(pointId)}/simulated-observation`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value, observed_at: observedAt }),
+    });
+    if (!res.ok) await throwApiError(res, "Simulated observation was rejected");
+    return res.json() as Promise<{ accepted: boolean; persisted: boolean; runtime_input_applied: boolean; reason_code: string | null }>;
+  },
   async createDevicePoint(deviceId: string, payload: Record<string, unknown>) {
     const res = await authFetch(`${API_BASE}/devices/${encodeURIComponent(deviceId)}/points`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
@@ -207,8 +239,8 @@ export const api = {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled }),
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.detail || "Unable to change manual override");
+    if (!res.ok) await throwApiError(res, "Unable to change manual override");
+    const data = await res.json();
     return data;
   },
 
@@ -217,8 +249,8 @@ export const api = {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled }),
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.detail || "Unable to change control state");
+    if (!res.ok) await throwApiError(res, "Unable to change control state");
+    const data = await res.json();
     return data;
   },
 

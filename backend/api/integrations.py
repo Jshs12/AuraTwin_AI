@@ -9,6 +9,8 @@ from sqlalchemy.exc import IntegrityError
 from backend.database.models import BuildingRecord, DeviceRecord, IntegrationRecord, PointMappingRecord
 from backend.schemas.integration_config import (DeviceCreate, DeviceUpdate,
     IntegrationCreate, IntegrationUpdate, PointCreate, PointUpdate)
+from backend.schemas.provider_observation import SimulatedObservationRequest
+from backend.integrations.simulated_observations import ExplicitValueSimulatedProvider
 from backend.security.dependencies import require_building_access, require_permission
 from backend.security.roles import Permission
 
@@ -314,6 +316,34 @@ def get_latest_point_observation(point_id: str, request: Request,
             zone_id=scope["database_zone_id"], signal=signal, limit=1)
         latest = observations[0].model_dump(mode="json") if observations else None
         return {"observation": latest}
+
+
+@router.post("/point-mappings/{point_id}/simulated-observation")
+def create_simulated_point_observation(point_id: str, body: SimulatedObservationRequest,
+                                       request: Request,
+                                       user=Depends(require_permission(Permission.INTEGRATIONS_CONFIGURE))):
+    """Record one explicit demo value; never performs network/device I/O."""
+    with _session(request)() as session:
+        point, device, integration = _point(session, request, user, point_id, write=True)
+        provider = ExplicitValueSimulatedProvider()
+        emitted = provider.observations(integration_id=str(integration.integration_id),
+            device_id=str(device.device_id), points=[point],
+            values={str(point.point_mapping_id): body.value}, observed_at=body.observed_at,
+            runtime_input=True)
+    if len(emitted) != 1:
+        raise HTTPException(status_code=409, detail={"code": "MAPPING_NOT_CONFIRMED_OR_READABLE",
+            "message": "A confirmed, readable point mapping is required."})
+    result = request.app.state.provider_observation_ingestion_service.ingest(emitted[0])
+    if not result.accepted:
+        raise HTTPException(status_code=422, detail={"code": "OBSERVATION_REJECTED",
+            "reason_code": result.reason_code, "quality_state": result.quality_state.value
+            if result.quality_state else None})
+    request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
+        action="simulated_observation_ingested", resource="point_mapping",
+        resource_id=point_id, building_id=str(integration.building_id), success=True,
+        metadata={"signal": result.signal, "simulated": True,
+                  "runtime_input_applied": result.runtime_input_applied})
+    return result
 
 
 @router.patch("/point-mappings/{point_id}")

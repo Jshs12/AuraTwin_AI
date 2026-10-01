@@ -28,7 +28,7 @@ export interface Floor {
   level_number: number | null;
 }
 
-export type TelemetrySignal = "occupancy" | "temperature" | "power" | "energy" | "cost" | "tariff_rate";
+export type TelemetrySignal = "occupancy" | "temperature" | "power" | "energy" | "cost" | "tariff_rate" | "cooling_setpoint";
 export interface HistoricalTelemetryPoint {
   organization_id: string;
   building_id: string;
@@ -64,6 +64,9 @@ export interface OccupancyEvent {
   occupancy_percentage: number;
   occupancy_state: "EMPTY" | "LOW" | "MEDIUM" | "HIGH" | "UNKNOWN";
   timestamp: string;
+  observed_at?: string | null;
+  source?: string;
+  simulated?: boolean;
 }
 
 export interface Tariff {
@@ -99,6 +102,11 @@ export interface BuildingControlState {
   fan_status: boolean | null;
   power_kw: number | null;
   energy_kwh: number | null;
+  observed_at?: string | null;
+  setpoint_observed_at?: string | null;
+  setpoint_source?: string | null;
+  setpoint_simulated?: boolean | null;
+  simulated?: boolean;
   last_command_timestamp: string | null;
 }
 // Kept as a type alias for consumers of the earlier API schema name.
@@ -133,6 +141,10 @@ export interface ZoneState {
   tariff: Tariff;
   hvac_status: BuildingControlState;
   occupancy_source?: string;
+  temperature_source?: string;
+  temperature_observed_at?: string | null;
+  temperature_simulated?: boolean;
+  data_quality?: { signals: Record<string, { state: string; source: string; simulated: boolean; reason_code: string | null }> };
   control_mode?: ZoneControlMode;
 }
 
@@ -245,6 +257,9 @@ export interface MonitoringStatus {
   zones: MonitoringZoneStatus[];
   demo_simulation?: boolean;
   demo_phase?: string | null;
+  monitoring_scope?: "DEMO_SCENARIO" | "CONFIGURED_BUILDING" | "STOPPED";
+  configured_zones_total?: number;
+  demo_zones_total?: number;
 }
 
 export interface DemoStatus {

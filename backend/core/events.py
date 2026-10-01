@@ -18,7 +18,8 @@ class EventBroadcaster:
 
     @classmethod
     def subscribe(cls, callback: Callable[[str], Any]):
-        cls._subscribers.append(callback)
+        if callback not in cls._subscribers:
+            cls._subscribers.append(callback)
 
     @classmethod
     def unsubscribe(cls, callback: Callable[[str], Any]):

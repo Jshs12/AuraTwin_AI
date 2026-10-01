@@ -169,7 +169,7 @@ class TelemetryObservationRecord(Base):
         Index("ix_telemetry_building_time", "building_id", "observed_at"),
         Index("ix_telemetry_building_floor_time", "building_id", "floor_id", "observed_at"),
         Index("ix_telemetry_zone_signal_time", "zone_id", "signal", "observed_at"),
-        CheckConstraint("signal IN ('occupancy', 'temperature', 'power', 'energy', 'cost', 'tariff_rate')", name="ck_telemetry_signal"),
+        CheckConstraint("signal IN ('occupancy', 'temperature', 'power', 'energy', 'cost', 'tariff_rate', 'cooling_setpoint')", name="ck_telemetry_signal"),
     )
 
     observation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)

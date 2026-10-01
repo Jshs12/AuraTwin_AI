@@ -51,6 +51,31 @@ class SafetyConstraintService:
     def command_policy_ready(self) -> bool:
         return self._command_policy_error() is None
 
+    def command_policy_status(self) -> dict[str, Any]:
+        """Safe readiness details: expose configuration names, never configured values."""
+        fields = {
+            "COMMAND_LIMIT_MIN_SETPOINT": self.min_setpoint,
+            "COMMAND_LIMIT_MAX_SETPOINT": self.max_setpoint,
+            "COMMAND_LIMIT_MAX_DELTA": self.max_setpoint_delta,
+        }
+        missing, invalid = [], []
+        for name, value in fields.items():
+            if value is not None:
+                continue
+            raw = os.getenv(name)
+            (missing if raw is None or not raw.strip() else invalid).append(name)
+        if not missing and not invalid:
+            if self.min_setpoint >= self.max_setpoint:
+                invalid.extend(("COMMAND_LIMIT_MIN_SETPOINT", "COMMAND_LIMIT_MAX_SETPOINT"))
+            if self.max_setpoint_delta <= 0:
+                invalid.append("COMMAND_LIMIT_MAX_DELTA")
+        invalid = sorted(set(invalid))
+        missing = sorted(set(missing) - set(invalid))
+        return {"ready": self.command_policy_ready, "missing_configuration": missing,
+                "invalid_configuration": invalid,
+                "reason_code": None if self.command_policy_ready else
+                    "COMMAND_POLICY_INCOMPLETE" if missing else "COMMAND_POLICY_INVALID"}
+
     def validate(self, recommendation: Any, state: ZoneState) -> SafetyValidationResult:
         raw = recommendation.model_dump() if isinstance(recommendation, IntelligenceRecommendation) else recommendation
         if not isinstance(raw, dict):

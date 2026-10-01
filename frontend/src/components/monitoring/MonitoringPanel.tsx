@@ -5,12 +5,14 @@ interface MonitoringPanelProps {
   status: MonitoringStatus | null;
   error?: string | null;
   connected: boolean;
+  connectionStatus?: string;
+  onReconnect?: () => void;
   onStart: () => void;
   onStop: () => void;
   canManage?: boolean;
 }
 
-export function MonitoringPanel({ status, error, connected, onStart, onStop, canManage = true }: MonitoringPanelProps) {
+export function MonitoringPanel({ status, error, connected, connectionStatus = connected ? "connected" : "disconnected", onReconnect, onStart, onStop, canManage = true }: MonitoringPanelProps) {
   const running = status?.running ?? false;
   const zones = status?.zones ?? [];
   const formatTime = (iso: string | null) => {
@@ -45,8 +47,10 @@ export function MonitoringPanel({ status, error, connected, onStart, onStop, can
               {running ? "RUNNING" : "STOPPED"}
             </span>
             <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginLeft: "0.5rem" }}>
-              WS: {connected ? "●" : "○"}
+              WS: {connectionStatus.replace(/-/g, " ").toUpperCase()}
             </span>
+            {!connected && connectionStatus === "disconnected" && onReconnect &&
+              <button className="btn btn-secondary" onClick={onReconnect} style={{ fontSize: "0.7rem", padding: "0.2rem 0.45rem" }}>Reconnect events</button>}
           </div>
         </div>
         {canManage && <div style={{ display: "flex", gap: "0.5rem" }}>
@@ -69,6 +73,11 @@ export function MonitoringPanel({ status, error, connected, onStart, onStop, can
             <div className="stat-block">
               <div className="stat-label">Monitored</div>
               <div className="stat-value">{status.zones_enabled} / {status.zones_total}</div>
+              <small style={{ color: "var(--text-muted)" }}>
+                {status.monitoring_scope === "DEMO_SCENARIO"
+                  ? `DEMO SCENARIO · ${status.demo_zones_total ?? status.zones_enabled} selected; configured building has ${status.configured_zones_total ?? status.zones_total} active zones`
+                  : status.monitoring_scope === "CONFIGURED_BUILDING" ? "Configured building scope" : "Configured building scope when started"}
+              </small>
             </div>
             <div className="stat-block">
               <div className="stat-label">Camera</div>

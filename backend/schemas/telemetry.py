@@ -12,6 +12,7 @@ class TelemetrySignal(StrEnum):
     ENERGY = "energy"
     COST = "cost"
     TARIFF_RATE = "tariff_rate"
+    COOLING_SETPOINT = "cooling_setpoint"
 
 
 class TelemetryObservation(BaseModel):

@@ -19,8 +19,10 @@ from backend.services.data_quality import DataQualityGate
 
 class RuntimeObservationConsumer:
     """Optional boundary for explicitly designated current inputs; historical data never updates runtime state."""
-    def apply_current_observation(self, *, zone_id: str, signal: str, value: float,
-                                  observed_at, source: str, simulated: bool) -> bool:
+    def apply_current_observation(self, *, organization_id: str, building_id: str, floor_id: str,
+                                  zone_id: str, zone_key: str, signal: str, value: float,
+                                  observed_at, source: str, simulated: bool,
+                                  quality_state: QualityState) -> bool:
         raise NotImplementedError
 
 
@@ -103,7 +105,8 @@ class ProviderObservationIngestionService:
     def _default_unit(signal: TelemetrySignal) -> str:
         return {TelemetrySignal.OCCUPANCY: "people", TelemetrySignal.TEMPERATURE: "°C",
             TelemetrySignal.POWER: "kW", TelemetrySignal.ENERGY: "kWh",
-            TelemetrySignal.COST: "currency", TelemetrySignal.TARIFF_RATE: "currency/kWh"}[signal]
+            TelemetrySignal.COST: "currency", TelemetrySignal.TARIFF_RATE: "currency/kWh",
+            TelemetrySignal.COOLING_SETPOINT: "°C"}[signal]
 
     @staticmethod
     def _unit_is_compatible(signal: TelemetrySignal, unit: str) -> bool:
@@ -112,6 +115,7 @@ class ProviderObservationIngestionService:
             TelemetrySignal.TEMPERATURE: {"°c", "c", "celsius"},
             TelemetrySignal.POWER: {"kw"}, TelemetrySignal.ENERGY: {"kwh"},
             TelemetrySignal.COST: set(), TelemetrySignal.TARIFF_RATE: set(),
+            TelemetrySignal.COOLING_SETPOINT: {"°c", "c", "celsius"},
         }
         normalized = unit.strip()
         if signal == TelemetrySignal.COST:
@@ -133,8 +137,11 @@ class ProviderObservationIngestionService:
                 reason_code="POINT_UNIT_INCOMPATIBLE")
         quality_signal = {TelemetrySignal.POWER: "power_kw", TelemetrySignal.COST: "energy_cost",
                           TelemetrySignal.TARIFF_RATE: "tariff_rate"}.get(resolved.signal, resolved.signal.value)
+        if resolved.signal == TelemetrySignal.COOLING_SETPOINT:
+            quality_signal = "setpoint"
         freshness_signal = {TelemetrySignal.POWER: "energy", TelemetrySignal.COST: "energy",
-                            TelemetrySignal.TARIFF_RATE: "tariff"}.get(resolved.signal, resolved.signal.value)
+                            TelemetrySignal.TARIFF_RATE: "tariff",
+                            TelemetrySignal.COOLING_SETPOINT: "setpoint"}.get(resolved.signal, resolved.signal.value)
         if resolved.signal == TelemetrySignal.OCCUPANCY and not observation.value.is_integer():
             return ObservationIngestionResult(accepted=False, signal=resolved.signal.value,
                 zone_id=resolved.zone_id, observed_at=observation.observed_at, source=observation.source,
@@ -174,11 +181,23 @@ class ProviderObservationIngestionService:
                 zone_id=resolved.zone_id, observed_at=observation.observed_at, source=observation.source,
                 simulated=observation.simulated, quality_state=quality, reason_code="PERSISTENCE_FAILED")
         runtime_applied = False
+        reason_code = None
         if observation.runtime_input and self.runtime_consumer is not None:
-            runtime_applied = bool(self.runtime_consumer.apply_current_observation(
-                zone_id=resolved.zone_key, signal=resolved.signal.value, value=float(observation.value),
-                observed_at=observation.observed_at, source=observation.source, simulated=observation.simulated))
+            if resolved.signal not in {TelemetrySignal.OCCUPANCY, TelemetrySignal.TEMPERATURE,
+                                       TelemetrySignal.COOLING_SETPOINT}:
+                reason_code = "SIGNAL_HISTORICAL_ONLY"
+            else:
+                runtime_applied = bool(self.runtime_consumer.apply_current_observation(
+                    organization_id=resolved.organization_id, building_id=resolved.building_id,
+                    floor_id=resolved.floor_id, zone_id=resolved.zone_id, zone_key=resolved.zone_key,
+                    signal=resolved.signal.value, value=float(observation.value),
+                    observed_at=observation.observed_at, source=observation.source,
+                    simulated=observation.simulated, quality_state=quality))
+                if not runtime_applied:
+                    reason_code = "RUNTIME_STATE_REJECTED"
+        else:
+            reason_code = "DUPLICATE" if inserted == 0 else None
         return ObservationIngestionResult(accepted=True, persisted=inserted > 0, duplicate=inserted == 0,
             signal=resolved.signal.value, zone_id=resolved.zone_id, observed_at=observation.observed_at,
             source=observation.source, simulated=observation.simulated, quality_state=quality,
-            reason_code="DUPLICATE" if inserted == 0 else None, runtime_input_applied=runtime_applied)
+            reason_code=reason_code, runtime_input_applied=runtime_applied)

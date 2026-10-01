@@ -5,6 +5,8 @@ from backend.core.events import EventTrace
 from backend.core.paths import resolve_project_path
 import json
 from backend.services.data_quality import DataQualityGate
+from backend.schemas.data_quality import QualityState
+from backend.core.time import utc_now
 
 class ZoneStateService:
     def __init__(
@@ -25,6 +27,9 @@ class ZoneStateService:
         self.configuration_repository = configuration_repository
         self.telemetry_service = telemetry_service
         self.zone_configurations = []
+        # Explicit current inputs live in the existing ZoneState service only;
+        # telemetry history is never read back to create runtime state.
+        self._runtime_observations: dict[str, dict[str, dict]] = {}
         self._zones = self.refresh_configuration()
         
     def _load_zones(self):
@@ -45,6 +50,8 @@ class ZoneStateService:
     def refresh_configuration(self):
         self.zone_configurations = []
         self._zones = self._load_zones()
+        self._runtime_observations = {zone_id: values for zone_id, values in self._runtime_observations.items()
+                                      if zone_id in self._zones}
         return self._zones
 
     def resolve_zone_id(self, zone_id: str) -> str:
@@ -56,7 +63,7 @@ class ZoneStateService:
                 return config.zone_id
         raise ValueError(f"Zone {zone_id} not found")
 
-    def get_zone_state(self, zone_id: str, occupancy_override=None) -> ZoneState:
+    def get_zone_state(self, zone_id: str, occupancy_override=None, *, persist: bool = True) -> ZoneState:
         zone_id = self.resolve_zone_id(zone_id)
         zone = self._zones.get(zone_id)
         if not zone:
@@ -118,9 +125,92 @@ class ZoneStateService:
             temperature_observed_at=temperature_observed_at,
             temperature_simulated=temperature_simulated,
         )
+        state = self._apply_runtime_observations(state, skip_occupancy=occupancy_override is not None,
+            observations=self._runtime_observations.get(zone_id, {}))
         state.data_quality = self.data_quality_gate.assess_zone_state(state)
-        if self.telemetry_service is not None:
+        if persist and self.telemetry_service is not None:
             self.telemetry_service.persist_zone_state(state)
         
-        EventTrace.log_event("STATE_EVALUATED", zone_id, "zone_state_service", {"temperature": temp, "setpoint": hvac.present_value})
+        EventTrace.log_event("STATE_EVALUATED", zone_id, "zone_state_service",
+            {"temperature": state.temperature, "setpoint": state.hvac_status.present_value})
         return state
+
+    @staticmethod
+    def _apply_runtime_observations(state: ZoneState, *, skip_occupancy: bool = False,
+                                    observations: dict[str, dict] | None = None) -> ZoneState:
+        values = observations or {}
+        updates = {}
+        occupancy = values.get("occupancy")
+        if occupancy is not None and not skip_occupancy:
+            count = int(occupancy["value"])
+            capacity = state.zone.capacity
+            percentage = count / capacity * 100 if capacity else 0.0
+            level = "EMPTY" if count == 0 else "LOW" if percentage < 30 else "MEDIUM" if percentage < 70 else "HIGH"
+            updates["occupancy"] = state.occupancy.model_copy(update={
+                "people_count": count, "capacity": capacity,
+                "occupancy_percentage": round(percentage, 1), "occupancy_state": level,
+                "timestamp": occupancy["observed_at"], "observed_at": occupancy["observed_at"],
+                "source": occupancy["source"], "simulated": occupancy["simulated"],
+            })
+            updates["occupancy_source"] = occupancy["source"]
+        temperature = values.get("temperature")
+        if temperature is not None:
+            updates.update(temperature=float(temperature["value"]),
+                temperature_observed_at=temperature["observed_at"],
+                temperature_source=temperature["source"], temperature_simulated=temperature["simulated"])
+        setpoint = values.get("cooling_setpoint")
+        if setpoint is not None:
+            updates["hvac_status"] = state.hvac_status.model_copy(update={
+                "present_value": float(setpoint["value"]),
+                "setpoint_observed_at": setpoint["observed_at"],
+                "setpoint_source": setpoint["source"],
+                "setpoint_simulated": setpoint["simulated"],
+            })
+        return state.model_copy(update=updates)
+
+    def apply_runtime_observation(self, *, organization_id: str, building_id: str, floor_id: str,
+                                  zone_id: str, zone_key: str, signal: str, value: float,
+                                  observed_at, source: str, simulated: bool,
+                                  quality_state: QualityState) -> bool:
+        """Apply an already mapped and quality-checked current observation to ZoneState."""
+        if signal not in {"occupancy", "temperature", "cooling_setpoint"}:
+            EventTrace.log_event("RUNTIME_OBSERVATION_REJECTED", zone_key, "runtime_observation",
+                                 {"signal": signal, "reason_code": "SIGNAL_HISTORICAL_ONLY"}, status="FAILED")
+            return False
+        if quality_state != QualityState.VALID or not source or observed_at is None:
+            EventTrace.log_event("RUNTIME_OBSERVATION_REJECTED", zone_key, "runtime_observation",
+                                 {"signal": signal, "reason_code": "OBSERVATION_NOT_VALID"}, status="FAILED")
+            return False
+        try:
+            config = self.configuration_repository.resolve_zone(zone_id)
+            if config is None or (config.building_id != building_id or config.floor_id != floor_id
+                    or config.database_zone_id != zone_id or config.zone_key != zone_key):
+                return False
+            scope = self.configuration_repository.telemetry_scope(zone_id)
+            if (scope is None or scope["organization_id"] != organization_id
+                    or scope["building_id"] != building_id or scope["floor_id"] != floor_id
+                    or scope["database_zone_id"] != zone_id):
+                return False
+            canonical_zone_id = self.resolve_zone_id(config.zone_id)
+            base = self.get_zone_state(canonical_zone_id, persist=False)
+        except (ValueError, AttributeError):
+            return False
+
+        current = dict(self._runtime_observations.get(canonical_zone_id, {}))
+        current[signal] = {"value": value, "observed_at": observed_at,
+                           "source": source, "simulated": bool(simulated)}
+        candidate = self._apply_runtime_observations(base, observations=current)
+        report = self.data_quality_gate.assess_zone_state(candidate, now=utc_now())
+        failures = self.data_quality_gate.critical_failures(report)
+        if failures:
+            EventTrace.log_event("RUNTIME_OBSERVATION_REJECTED", canonical_zone_id, "runtime_observation",
+                {"signal": signal, "reason_code": "CRITICAL_STATE_QUALITY_REJECTED",
+                 "quality_state": quality_state.value, "simulated": bool(simulated),
+                 "failed_signals": {name: {"state": item.state.value,
+                     "reason_code": item.reason_code} for name, item in failures.items()}}, status="FAILED")
+            return False
+        self._runtime_observations.setdefault(canonical_zone_id, {})[signal] = current[signal]
+        EventTrace.log_event("RUNTIME_OBSERVATION_APPLIED", canonical_zone_id, "runtime_observation",
+            {"signal": signal, "quality_state": QualityState.VALID.value,
+             "source": source, "simulated": bool(simulated)})
+        return True

@@ -10,7 +10,7 @@ from backend.security.jwt import create_access_token, decode_access_token, ISSUE
 from backend.security.repository import InMemoryUserRepository
 from backend.security.models import User
 from backend.api.main import app
-from backend.core.events import EventTrace
+from backend.core.events import EventTrace, EventBroadcaster
 from tests.security_test_utils import make_client, make_user, bare_client
 from backend.security.service import AuthService
 
@@ -186,12 +186,15 @@ def test_websocket_rejects_anonymous_and_accepts_authorized_operator():
             pass
     authorized = make_client()
     token = authorized.headers["Authorization"].split(" ", 1)[1]
+    subscriber_count = len(EventBroadcaster._subscribers)
     with authorized.websocket_connect(f"/api/monitoring/ws/events?access_token={token}") as websocket:
+        assert len(EventBroadcaster._subscribers) == subscriber_count + 1
         response = authorized.post("/api/zones/classroom_01/recommendation")
         assert response.status_code == 200
         event = websocket.receive_json()
         assert event["event_type"] in {"OCCUPANCY_DETECTED", "STATE_EVALUATED", "OPTIMIZATION_REQUESTED",
             "INTELLIGENCE_REQUESTED", "INTELLIGENCE_RESPONSE", "RECOMMENDATION_VALIDATED", "OPTIMIZATION_RECOMMENDATION"}
+    assert len(EventBroadcaster._subscribers) == subscriber_count
 
 
 def test_api_secret_never_in_events_or_audit():

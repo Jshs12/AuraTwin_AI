@@ -72,6 +72,8 @@ from backend.database.repositories import SQLAlchemyUserRepository, SQLAlchemyOr
 from backend.database.configuration import SQLAlchemyConfigurationRepository
 from backend.telemetry.repository import SQLAlchemyTelemetryRepository
 from backend.telemetry.service import TelemetryPersistenceService, telemetry_query_max_limit
+from backend.telemetry.ingestion import ProviderObservationIngestionService
+from backend.telemetry.runtime_consumer import ZoneStateRuntimeConsumer
 from backend.schemas.telemetry import TelemetryAnalyticsResponse, TelemetrySignal
 from datetime import datetime
 from backend.api.configuration import router as configuration_router
@@ -228,6 +230,10 @@ app.state.monitoring_scheduler = ZoneMonitoringScheduler(zone_state_service, rec
 app.state.demo_scenario = DemoScenarioEngine()
 app.state.zone_state_service = zone_state_service
 app.state.telemetry_service = telemetry_service
+app.state.provider_observation_ingestion_service = ProviderObservationIngestionService(
+    database_sessions, telemetry_service, data_quality=zone_state_service.data_quality_gate,
+    runtime_consumer=ZoneStateRuntimeConsumer(zone_state_service),
+)
 
 app.include_router(monitoring.router, prefix="/api/monitoring")
 app.include_router(configuration_router, prefix="/api")
@@ -798,19 +804,35 @@ async def set_zone_control_enabled(zone_id: str, body: ControlModeUpdate, reques
     current.data_quality = quality
     failures = control_service.data_quality.critical_failures(quality)
     if failures:
+        failed_signals = {name: {"state": getattr(getattr(item, "state", None), "value", "INVALID"),
+                                 "reason_code": getattr(item, "reason_code", None) or "QUALITY_REJECTED"}
+                          for name, item in failures.items()}
         request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
             action="control_enable_rejected", resource="zone_control_state", resource_id=zone_id,
             building_id=_zone_building_id(zone_id), success=False,
             metadata={"reason_code": "DATA_QUALITY_REJECTED"},
         )
-        raise HTTPException(status_code=409, detail="Fresh critical zone data is required before enabling control.")
-    if not control_service.safety.command_policy_ready:
+        raise HTTPException(status_code=409, detail={"code": "CRITICAL_DATA_UNAVAILABLE",
+            "message": "Fresh critical zone data is required before enabling control.",
+            "signals": failed_signals})
+    policy_status = control_service.safety.command_policy_status()
+    if not policy_status["ready"]:
         request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
             action="control_enable_rejected", resource="zone_control_state", resource_id=zone_id,
             building_id=_zone_building_id(zone_id), success=False,
-            metadata={"reason_code": "COMMAND_POLICY_UNAVAILABLE"},
+            metadata={"reason_code": policy_status["reason_code"]},
         )
-        raise HTTPException(status_code=409, detail="Configured command limits are required before enabling control.")
+        raise HTTPException(status_code=409, detail={
+            "code": policy_status["reason_code"],
+            "message": "Safety command-limit policy is incomplete." if policy_status["missing_configuration"]
+                else "Safety command-limit policy is invalid.",
+            "missing_configuration": policy_status["missing_configuration"],
+            "invalid_configuration": policy_status["invalid_configuration"],
+        })
+    mode = control_service.control_states.snapshot(zone_id)
+    if mode.manual_override:
+        raise HTTPException(status_code=409, detail={"code": "MANUAL_OVERRIDE_ACTIVE",
+            "message": "Disable manual override before enabling autonomous control."})
     if not control_service._provider_ready():
         control_service.control_states.note_provider_failure(zone_id,
             command_id="operator-enable", reason_code="PROVIDER_UNAVAILABLE", provider_ready=False)
@@ -819,7 +841,8 @@ async def set_zone_control_enabled(zone_id: str, body: ControlModeUpdate, reques
             building_id=_zone_building_id(zone_id), success=False,
             metadata={"reason_code": "PROVIDER_UNAVAILABLE"},
         )
-        raise HTTPException(status_code=409, detail="Control provider must be ready before enabling control.")
+        raise HTTPException(status_code=409, detail={"code": "CONTROL_PROVIDER_UNAVAILABLE",
+            "message": "Control provider must be ready before enabling control."})
     control_service.control_states.note_provider_ready(zone_id)
     state = control_service.control_states.set_control_enabled(zone_id, True, user_id=user.user_id)
     request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
