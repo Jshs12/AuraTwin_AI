@@ -10,7 +10,7 @@ interface TopNavProps {
 }
 
 export function TopNav({ activeSection, onNavigate, monitoringRunning, wsConnected, demoSimulation, occupancyProvider, occupancyProviderReady, role }: TopNavProps) {
-  const sections = ["Overview", "Zones", "Occupancy", "Energy", "Events", "Access", ...(role === "ADMIN" ? ["Audit"] : [])];
+  const sections = ["Overview", "Zones", "Occupancy", "Energy", "Events", ...(role === "OPERATOR" ? ["Integrations"] : []), "Access", ...(role === "ADMIN" ? ["Audit"] : [])];
   const occupancyLabel = demoSimulation
     ? "DEMO SIMULATED"
     : occupancyProvider === "yolo"

@@ -75,6 +75,9 @@ from backend.telemetry.service import TelemetryPersistenceService, telemetry_que
 from backend.schemas.telemetry import TelemetryAnalyticsResponse, TelemetrySignal
 from datetime import datetime
 from backend.api.configuration import router as configuration_router
+from backend.api.integrations import router as integrations_router
+from backend.integrations.connection_test import ConfigurationOnlyTester
+from backend.integrations.discovery import NoDiscoveryProvider
 
 # Configuration/auth and scalar telemetry observations are persistent. Live
 # ZoneState snapshots, event traces, and demo stream history remain runtime-only.
@@ -117,6 +120,9 @@ app = FastAPI(title="AuraTwin AI V2 API", lifespan=lifespan)
 app.state.auth_service = AuthService(SQLAlchemyUserRepository(database_sessions))
 app.state.audit_service = AuditService()
 app.state.configuration_repository = configuration_repository
+app.state.database_sessions = database_sessions
+app.state.integration_connection_tester = ConfigurationOnlyTester()
+app.state.discovery_provider = NoDiscoveryProvider()
 app.state.organization_repository = organization_repository
 app.state.building_access = BuildingAccessRepository(configuration_repository)
 
@@ -225,6 +231,7 @@ app.state.telemetry_service = telemetry_service
 
 app.include_router(monitoring.router, prefix="/api/monitoring")
 app.include_router(configuration_router, prefix="/api")
+app.include_router(integrations_router, prefix="/api")
 
 
 def _public_user(request: Request, user: User):

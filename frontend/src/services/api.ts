@@ -82,6 +82,86 @@ export const api = {
     if (!res.ok) throw new Error("Unable to fetch authorized buildings");
     return (await res.json()).buildings;
   },
+
+  async getIntegrations(buildingId: string) {
+    const res = await authFetch(`${API_BASE}/buildings/${encodeURIComponent(buildingId)}/integrations`);
+    if (!res.ok) throw new Error("Unable to load building integrations");
+    return (await res.json()).integrations as Array<any>;
+  },
+  async createIntegration(buildingId: string, payload: { name: string; integration_type: string; configuration: Record<string, unknown> }) {
+    const res = await authFetch(`${API_BASE}/buildings/${encodeURIComponent(buildingId)}/integrations`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "Unable to create integration");
+    return data;
+  },
+  async updateIntegration(integrationId: string, payload: Record<string, unknown>) {
+    const res = await authFetch(`${API_BASE}/integrations/${encodeURIComponent(integrationId)}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "Unable to update integration");
+    return data;
+  },
+  async disableIntegration(integrationId: string) {
+    const res = await authFetch(`${API_BASE}/integrations/${encodeURIComponent(integrationId)}`, { method: "DELETE" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "Unable to disable integration");
+    return data;
+  },
+  async testIntegration(integrationId: string) {
+    const res = await authFetch(`${API_BASE}/integrations/${encodeURIComponent(integrationId)}/test-connection`, { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "Unable to validate integration configuration");
+    return data;
+  },
+  async getIntegrationDevices(integrationId: string) {
+    const res = await authFetch(`${API_BASE}/integrations/${encodeURIComponent(integrationId)}/devices`);
+    if (!res.ok) throw new Error("Unable to load devices");
+    return (await res.json()).devices as Array<any>;
+  },
+  async createIntegrationDevice(integrationId: string, payload: Record<string, unknown>) {
+    const res = await authFetch(`${API_BASE}/integrations/${encodeURIComponent(integrationId)}/devices`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "Unable to add device");
+    return data;
+  },
+  async updateIntegrationDevice(deviceId: string, payload: Record<string, unknown>) {
+    const res = await authFetch(`${API_BASE}/devices/${encodeURIComponent(deviceId)}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "Unable to update device");
+    return data;
+  },
+  async disableIntegrationDevice(deviceId: string) {
+    const res = await authFetch(`${API_BASE}/devices/${encodeURIComponent(deviceId)}`, { method: "DELETE" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "Unable to disable device");
+    return data;
+  },
+  async getDevicePoints(deviceId: string) {
+    const res = await authFetch(`${API_BASE}/devices/${encodeURIComponent(deviceId)}/points`);
+    if (!res.ok) throw new Error("Unable to load logical signal mappings");
+    return (await res.json()).points as Array<any>;
+  },
+  async createDevicePoint(deviceId: string, payload: Record<string, unknown>) {
+    const res = await authFetch(`${API_BASE}/devices/${encodeURIComponent(deviceId)}/points`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "Unable to add point mapping");
+    return data;
+  },
+  async decidePointMapping(pointId: string, decision: "confirm" | "reject") {
+    const res = await authFetch(`${API_BASE}/point-mappings/${encodeURIComponent(pointId)}/${decision}`, { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "Unable to update mapping");
+    return data;
+  },
   async getZones(buildingId?: string): Promise<Zone[]> {
     const query = buildingId ? `?building_id=${encodeURIComponent(buildingId)}` : "";
     const res = await authFetch(`${API_BASE}/zones${query}`);

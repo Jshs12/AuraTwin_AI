@@ -215,6 +215,8 @@ class DeviceRecord(TimestampMixin, Base):
     external_device_id: Mapped[str] = mapped_column(String(200), nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     device_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    manufacturer: Mapped[str | None] = mapped_column(String(160))
+    model: Mapped[str | None] = mapped_column(String(160))
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="UNCONFIGURED", server_default="UNCONFIGURED")
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -239,5 +241,8 @@ class PointMappingRecord(TimestampMixin, Base):
     readable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     writable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, nullable=False, default=dict)
+    mapping_status: Mapped[str] = mapped_column(String(24), nullable=False, default="UNMAPPED", server_default="UNMAPPED")
+    mapping_confidence: Mapped[float | None] = mapped_column(Float(precision=53))
+    mapping_source: Mapped[str | None] = mapped_column(String(40))
 
     device: Mapped[DeviceRecord] = relationship(back_populates="point_mappings")

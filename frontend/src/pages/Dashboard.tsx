@@ -16,8 +16,9 @@ import { formatISTTimestamp } from "../utils/time";
 import { AccessPanel } from "../components/security/AccessPanel";
 import { AuditPanel } from "../components/security/AuditPanel";
 import { api } from "../services/api";
+import { IntegrationConfiguration } from "../components/integrations/IntegrationConfiguration";
 
-type Section = "Overview" | "Zones" | "Occupancy" | "Energy" | "Events" | "Access" | "Audit";
+type Section = "Overview" | "Zones" | "Occupancy" | "Energy" | "Events" | "Integrations" | "Access" | "Audit";
 
 export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
   const [activeSection, setActiveSection] = useState<Section>("Overview");
@@ -171,6 +172,7 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
           </div>
         )}
         {activeSection === "Access" && <AccessPanel role={role} />}
+        {activeSection === "Integrations" && role === "OPERATOR" && <IntegrationConfiguration buildingId={selectedBuildingId} />}
         {activeSection === "Audit" && role === "ADMIN" && <AuditPanel />}
       </main>
     </div>
