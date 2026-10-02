@@ -53,15 +53,16 @@ export function DemoModePanel({ onSummary }: Props) {
   const running = status?.status === "RUNNING";
   const paused = status?.status === "PAUSED";
   const controlEvents = activities.slice(-4).reverse();
+  const hasSamples = Boolean(summary?.energy_history.length);
   const metrics = [
-    ["Total occupants", summary?.total_occupants ?? 0],
-    ["Occupied zones", `${summary?.occupied_zones ?? 0} / ${summary?.active_zones ?? 0}`],
+    ["Total occupants", hasSamples && summary ? summary.total_occupants : "—"],
+    ["Occupied zones", hasSamples && summary ? `${summary.occupied_zones} / ${summary.active_zones}` : "—"],
     ["Average temperature", summary?.average_zone_temperature == null ? "—" : `${summary.average_zone_temperature.toFixed(1)}°C`],
     ["Average setpoint", summary?.average_setpoint == null ? "—" : `${summary.average_setpoint.toFixed(1)}°C`],
-    ["SIMULATED POWER", `${(summary?.simulated_power_kw ?? 0).toFixed(1)} kW`],
-    ["SIMULATED ENERGY", `${(summary?.simulated_energy_kwh ?? 0).toFixed(2)} kWh`],
-    ["SIMULATED COST", `${(summary?.simulated_cost ?? 0).toFixed(2)} ${summary?.currency ?? "USD"}`],
-    ["Active controls", summary?.zones_under_active_control ?? 0],
+    ["SIMULATED POWER", hasSamples && summary ? `${summary.simulated_power_kw.toFixed(1)} kW` : "—"],
+    ["SIMULATED ENERGY", hasSamples && summary ? `${summary.simulated_energy_kwh.toFixed(2)} kWh` : "—"],
+    ["SIMULATED COST", hasSamples && summary ? `${summary.simulated_cost.toFixed(2)} ${summary.currency}` : "—"],
+    ["Active controls", hasSamples && summary ? summary.zones_under_active_control : "—"],
   ] as const;
 
   return (
@@ -91,6 +92,7 @@ export function DemoModePanel({ onSummary }: Props) {
         <span>{status?.phase_number ?? 0} / {status?.total_phases ?? 4}</span>
         <span>Elapsed: {elapsed(status?.elapsed_seconds ?? 0)}</span>
         <span>Provider: {summary?.provider ?? "SIMULATED BACNET"}</span>
+        <span>Safety: {status?.safety_profile ?? "normal policy · demo inactive"}</span>
       </div>
       {refreshError && <div className="demo-error" role="alert">{refreshError}</div>}
       {error && <div className="demo-error" role="alert">{error}</div>}

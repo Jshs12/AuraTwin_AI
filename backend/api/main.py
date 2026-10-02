@@ -40,6 +40,7 @@ from backend.schemas.control import ControlModeUpdate
 from backend.intelligence.schemas import RecommendationSubmission, IntelligenceRecommendation
 from backend.intelligence.service import RecommendationWorkflow
 from backend.intelligence.factory import intelligence_provider_from_environment
+from backend.intelligence.providers import MockIntelligenceProvider
 from backend.core.mock_providers import (
     MockOccupancyProvider, MockTemperatureProvider,
     MockTariffProvider, MockEnergyProvider,
@@ -52,7 +53,8 @@ from backend.services.control_state import ZoneControlStateService
 from backend.core.events import EventTrace, EventBroadcaster
 from backend.core.monitoring import ZoneMonitoringScheduler
 from backend.core.mock_providers import MockEnergyStreamProvider
-from backend.demo.scenario import DemoScenarioEngine
+from backend.demo.scenario import DemoScenarioEngine, DemoScenarioOccupancyProvider
+from backend.demo.safety_profile import DEMO_SAFETY_PROFILE_NAME, build_demo_safety_profile
 from backend.api import monitoring
 import asyncio
 from fastapi import Depends, Request
@@ -119,6 +121,8 @@ async def lifespan(application: FastAPI):
         scenario = getattr(application.state, "demo_scenario", None)
         if scenario is not None:
             await scenario.reset()
+        if hasattr(application.state, "demo_safety_profile"):
+            await _restore_demo_runtime()
         if pending_tasks:
             await asyncio.gather(*pending_tasks, return_exceptions=True)
         database_engine.dispose()
@@ -238,6 +242,12 @@ app.state.monitoring_scheduler = ZoneMonitoringScheduler(
     optimization_interval_service=optimization_interval_service,
 )
 app.state.demo_scenario = DemoScenarioEngine()
+app.state.demo_safety_profile = None
+app.state.demo_original_control_enabled = {}
+app.state.demo_original_workflow = None
+app.state.demo_original_control_service = None
+app.state.demo_original_provider_safety = None
+app.state.demo_started_by = None
 app.state.zone_state_service = zone_state_service
 app.state.telemetry_service = telemetry_service
 app.state.provider_observation_ingestion_service = ProviderObservationIngestionService(
@@ -385,7 +395,8 @@ async def control_policy_status(request: Request,
 @app.get("/api/demo/status")
 async def get_demo_status(request: Request, _user=Depends(require_any_permission(Permission.SYSTEM_READ, Permission.BUILDING_READ))):
     _require_demo_scope(_user, request)
-    return app.state.demo_scenario.status_payload()
+    return {**app.state.demo_scenario.status_payload(),
+            "safety_profile": app.state.demo_safety_profile}
 
 
 def _demo_capacities():
@@ -400,6 +411,109 @@ def _require_demo_scope(user, request: Request):
     allowed = {zone.zone_id for zone in application.state.configuration_repository.zones_for_user(user)}
     if not set(application.state.demo_scenario.ZONES).issubset(allowed):
         raise HTTPException(status_code=403, detail="Demo scenario is outside the assigned building scope.")
+
+
+async def _restore_demo_runtime(*, actor_id: str | None = None):
+    """Restore the normal services and disable only control enabled by this demo."""
+    scheduler = app.state.monitoring_scheduler
+    scheduler.demo_mode = False
+    scheduler.scope_owner_id = None
+    original_workflow = app.state.demo_original_workflow
+    original_control = app.state.demo_original_control_service
+    original_provider_safety = app.state.demo_original_provider_safety
+    if original_workflow is not None:
+        scheduler.workflow = original_workflow
+    if original_control is not None:
+        scheduler.control_service = original_control
+    if hasattr(control_prov, "command_safety"):
+        control_prov.command_safety = original_provider_safety
+
+    for zone_id, previously_enabled in list(app.state.demo_original_control_enabled.items()):
+        if previously_enabled:
+            continue
+        mode = control_service.control_states.snapshot(zone_id)
+        # Never undo a fail-safe latch or re-enable after provider failure.
+        if mode.control_enabled and not mode.fail_safe_active and not mode.provider_failure_latched:
+            control_service.control_states.set_control_enabled(zone_id, False, user_id="demo-scenario")
+            if actor_id:
+                app.state.audit_service.record(user_id=actor_id, role="OPERATOR",
+                    action="demo_control_disabled", resource="zone_control_state",
+                    resource_id=zone_id, building_id=_zone_building_id(zone_id),
+                    success=True, metadata={"simulation": True})
+
+    app.state.demo_original_control_enabled = {}
+    app.state.demo_original_workflow = None
+    app.state.demo_original_control_service = None
+    app.state.demo_original_provider_safety = None
+    app.state.demo_safety_profile = None
+    app.state.demo_started_by = None
+
+
+def _prepare_demo_runtime(user):
+    """Install an isolated deterministic workflow for this simulated run."""
+    scheduler = app.state.monitoring_scheduler
+    demo_zone_ids = list(app.state.demo_scenario.ZONES)
+    demo_zones = [zone_state_service._zones[zone_id] for zone_id in demo_zone_ids
+                  if zone_id in zone_state_service._zones]
+    if len(demo_zones) != len(demo_zone_ids):
+        raise HTTPException(status_code=409, detail="Configured demo zones are unavailable.")
+
+    demo_safety = build_demo_safety_profile(demo_zones, control_prov)
+    profile_status = demo_safety.command_policy_status()
+    if not profile_status["ready"]:
+        raise HTTPException(status_code=409, detail="The simulated demo safety profile is invalid.")
+
+    if not control_service._provider_ready():
+        raise HTTPException(status_code=409, detail="The simulated control provider is unavailable.")
+
+    scenario = app.state.demo_scenario
+    demo_occupancy = DemoScenarioOccupancyProvider(_demo_capacities())
+    demo_occupancy.set_counts(scenario.ZONES, scenario.PHASES[0][1])
+    prior_modes = {}
+    for zone_id in demo_zone_ids:
+        state = zone_state_service.get_zone_state(
+            zone_id, occupancy_override=demo_occupancy.get_occupancy(zone_id), persist=False)
+        quality = zone_state_service.data_quality_gate.assess_zone_state(state)
+        failures = zone_state_service.data_quality_gate.critical_failures(quality)
+        if failures:
+            raise HTTPException(status_code=409, detail={
+                "code": "DEMO_STATE_QUALITY_REJECTED",
+                "message": "Fresh valid zone data is required before starting the simulated optimization demo.",
+                "signals": {name: assessment.state.value for name, assessment in failures.items()},
+            })
+        mode = control_service.control_states.snapshot(zone_id)
+        if mode.manual_override or mode.fail_safe_active or mode.provider_failure_latched:
+            raise HTTPException(status_code=409, detail={
+                "code": "DEMO_CONTROL_STATE_BLOCKED",
+                "message": "Manual override or fail-safe state blocks the simulated optimization demo.",
+            })
+        prior_modes[zone_id] = mode.control_enabled
+
+    app.state.demo_original_workflow = scheduler.workflow
+    app.state.demo_original_control_service = scheduler.control_service
+    app.state.demo_original_provider_safety = getattr(control_prov, "command_safety", None)
+    app.state.demo_original_control_enabled = prior_modes
+    app.state.demo_started_by = user.user_id
+    app.state.demo_safety_profile = DEMO_SAFETY_PROFILE_NAME
+    demo_workflow = RecommendationWorkflow(
+        provider=MockIntelligenceProvider(), optimizer=optimizer, safety=demo_safety,
+        data_quality=zone_state_service.data_quality_gate,
+    )
+    demo_control = ControlService(
+        control_prov, safety=demo_safety, data_quality=zone_state_service.data_quality_gate,
+        state_provider=zone_state_service.get_zone_state,
+        control_states=control_service.control_states,
+    )
+    scheduler.workflow = demo_workflow
+    scheduler.control_service = demo_control
+    control_prov.command_safety = demo_safety
+    for zone_id, was_enabled in prior_modes.items():
+        if not was_enabled:
+            control_service.control_states.set_control_enabled(zone_id, True, user_id=user.user_id)
+            app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
+                action="demo_control_enabled", resource="zone_control_state", resource_id=zone_id,
+                building_id=_zone_building_id(zone_id), success=True,
+                metadata={"simulation": True, "safety_profile": DEMO_SAFETY_PROFILE_NAME})
 
 
 @app.post("/api/demo/start")
@@ -427,6 +541,7 @@ async def start_demo(user=Depends(require_permission(Permission.MONITORING_MANAG
                 zone.update({"last_snapshot": None, "last_inference": None, "last_frame": None,
                              "last_people_count": 0, "status": "IDLE"})
         await scheduler.stop_and_wait()
+        _prepare_demo_runtime(user)
         scheduler.configure_zones(demo_zone_ids)
         scheduler.demo_mode = True
         scheduler.scope_owner_id = user.user_id
@@ -434,20 +549,29 @@ async def start_demo(user=Depends(require_permission(Permission.MONITORING_MANAG
         await app.state.energy_stream_provider.stop_and_wait()
 
         async def on_demo_complete():
-            scheduler.demo_mode = False
             await scheduler.stop_and_wait()
-            scheduler.scope_owner_id = None
+            await _restore_demo_runtime(actor_id=app.state.demo_started_by)
             scheduler.configure_zones(zone.zone_id for zone in configuration_repository.zones_for_user(user))
 
-        result = await app.state.demo_scenario.start(
-            scheduler.process_simulated_occupancy,
-            _demo_capacities(),
-            on_complete=on_demo_complete,
-        )
+        try:
+            result = await app.state.demo_scenario.start(
+                scheduler.process_simulated_occupancy,
+                _demo_capacities(),
+                on_complete=on_demo_complete,
+            )
+        except Exception:
+            await scheduler.stop_and_wait()
+            await _restore_demo_runtime(actor_id=user.user_id)
+            scheduler.configure_zones(zone.zone_id for zone in configuration_repository.zones_for_user(user))
+            raise
         app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
             action="demo_start", resource="demo", resource_id=result.get("scenario_id"),
-            success=True, metadata={"simulation": True})
+            success=True, metadata={"simulation": True,
+                                    "safety_profile": DEMO_SAFETY_PROFILE_NAME,
+                                    "intelligence_provider": MockIntelligenceProvider.provider_name})
         return result
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
@@ -481,10 +605,10 @@ async def stop_demo(request: Request, user=Depends(require_permission(Permission
     _require_demo_scope(user, request)
     try:
         result = await app.state.demo_scenario.stop()
-        app.state.monitoring_scheduler.demo_mode = False
-        await app.state.monitoring_scheduler.stop_and_wait()
-        app.state.monitoring_scheduler.scope_owner_id = None
-        app.state.monitoring_scheduler.configure_zones(
+        scheduler = app.state.monitoring_scheduler
+        await scheduler.stop_and_wait()
+        await _restore_demo_runtime(actor_id=user.user_id)
+        scheduler.configure_zones(
             zone.zone_id for zone in configuration_repository.zones_for_user(user))
         app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
             action="demo_stop", resource="demo", success=True, metadata={"simulation": True})
@@ -496,18 +620,21 @@ async def stop_demo(request: Request, user=Depends(require_permission(Permission
 @app.post("/api/demo/reset")
 async def reset_demo(request: Request, user=Depends(require_permission(Permission.MONITORING_MANAGE))):
     _require_demo_scope(user, request)
+    scheduler = app.state.monitoring_scheduler
+    if app.state.demo_scenario.status.value in {"RUNNING", "PAUSED"}:
+        await app.state.demo_scenario.stop()
+    await scheduler.stop_and_wait()
+    await _restore_demo_runtime(actor_id=user.user_id)
+    scheduler.configure_zones(zone.zone_id for zone in configuration_repository.zones_for_user(user))
     result = await app.state.demo_scenario.reset()
-    app.state.monitoring_scheduler.demo_mode = False
-    await app.state.monitoring_scheduler.stop_and_wait()
-    app.state.monitoring_scheduler.scope_owner_id = None
     await app.state.energy_stream_provider.stop_and_wait()
     if hasattr(control_prov, "reset_simulation"):
         control_prov.reset_simulation()
     control_service.last_results.clear()
-    app.state.monitoring_scheduler.demo_current_states.clear()
-    app.state.monitoring_scheduler.demo_control_activity.clear()
-    app.state.monitoring_scheduler.energy_telemetry.reset()
-    for zone in app.state.monitoring_scheduler.zone_states.values():
+    scheduler.demo_current_states.clear()
+    scheduler.demo_control_activity.clear()
+    scheduler.energy_telemetry.reset()
+    for zone in scheduler.zone_states.values():
         zone.update({"last_snapshot": None, "last_inference": None, "last_frame": None,
                     "last_people_count": 0, "status": "IDLE"})
     app.state.audit_service.record(user_id=user.user_id, role=user.role.value,

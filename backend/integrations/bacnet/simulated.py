@@ -35,6 +35,10 @@ class SimulatedBACnetBuildingControlProvider(BuildingControlProvider):
         failure_mode: Optional[Literal["unavailable", "acknowledgement", "hvac_response"]] = None,
     ):
         self.failure_mode = failure_mode
+        # Normal operation remains fail-closed from environment configuration.
+        # An explicitly scoped simulated demo may temporarily supply the same
+        # SafetyConstraintService used by its workflow and ControlService.
+        self.command_safety = None
         self._strict_zones = zone_ids is not None
         self._states: dict[str, dict] = {}
         self._lock = threading.RLock()
@@ -187,7 +191,8 @@ class SimulatedBACnetBuildingControlProvider(BuildingControlProvider):
             # depend on shared intelligence schemas, while this provider is
             # itself loaded during API startup.
             from backend.safety.constraints import SafetyConstraintService
-            rejection = SafetyConstraintService().validate_command_values(
+            safety = self.command_safety or SafetyConstraintService()
+            rejection = safety.validate_command_values(
                 command.model_dump(), command.zone_id, previous,
             )
             if rejection:
@@ -247,6 +252,9 @@ class SimulatedBACnetBuildingControlProvider(BuildingControlProvider):
                 requested_setpoint=requested, applied_setpoint=requested,
                 previous_setpoint=previous, success=True, status="SUCCESS",
                 provider=self.provider_identity, simulated=True,
+                # Align the acknowledged apply time with the simulated HVAC
+                # observation persisted as the interval's starting boundary.
+                timestamp=step.timestamp,
                 recommendation_reference=command.recommendation_reference,
                 hvac_mode=step.hvac_mode, current_temperature=step.current_temperature,
                 power_kw=step.power_kw, energy_kwh=step.energy_kwh,

@@ -276,6 +276,7 @@ export interface DemoStatus {
   speed_multiplier: number;
   started_at: string | null;
   simulation: true;
+  safety_profile?: string | null;
 }
 
 export interface DemoBuildingSummary {
