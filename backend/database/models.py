@@ -188,6 +188,81 @@ class TelemetryObservationRecord(Base):
     idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
+class OptimizationIntervalRecord(Base):
+    """Tenant-scoped persisted lifecycle and validated attribution boundaries."""
+
+    __tablename__ = "optimization_intervals"
+    __table_args__ = (
+        ForeignKeyConstraint(["organization_id", "building_id"],
+            ["buildings.organization_id", "buildings.building_id"], ondelete="RESTRICT",
+            name="fk_optimization_org_building"),
+        ForeignKeyConstraint(["building_id", "floor_id"],
+            ["floors.building_id", "floors.floor_id"], ondelete="RESTRICT",
+            name="fk_optimization_building_floor"),
+        ForeignKeyConstraint(["floor_id", "zone_id"],
+            ["zones.floor_id", "zones.zone_id"], ondelete="RESTRICT",
+            name="fk_optimization_floor_zone"),
+        CheckConstraint("status IN ('ACTIVE', 'COMPLETED')", name="ck_optimization_status"),
+        CheckConstraint("energy_status IN ('PENDING', 'AVAILABLE', 'UNAVAILABLE', 'INVALID')",
+                        name="ck_optimization_energy_status"),
+        CheckConstraint("cost_status IN ('PENDING', 'AVAILABLE', 'UNAVAILABLE', 'INVALID')",
+                        name="ck_optimization_cost_status"),
+        CheckConstraint("energy_unit = 'kWh'", name="ck_optimization_energy_unit"),
+        Index("ix_optimization_org_building_started", "organization_id", "building_id", "started_at"),
+        Index("ix_optimization_zone_started", "zone_id", "started_at"),
+        Index("uq_optimization_active_zone", "zone_id", unique=True,
+              sqlite_where=text("status = 'ACTIVE'"),
+              postgresql_where=text("status = 'ACTIVE'")),
+    )
+
+    interval_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    organization_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    building_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    floor_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    zone_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    zone_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="ACTIVE")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    starting_occupancy: Mapped[int] = mapped_column(Integer, nullable=False)
+    ending_occupancy: Mapped[int | None] = mapped_column(Integer)
+    starting_occupancy_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ending_occupancy_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    previous_setpoint: Mapped[float] = mapped_column(Float(precision=53), nullable=False)
+    optimized_setpoint: Mapped[float] = mapped_column(Float(precision=53), nullable=False)
+    setpoint_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    starting_temperature: Mapped[float] = mapped_column(Float(precision=53), nullable=False)
+    ending_temperature: Mapped[float | None] = mapped_column(Float(precision=53))
+    starting_temperature_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ending_temperature_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_seconds: Mapped[float | None] = mapped_column(Float(precision=53))
+    starting_energy_kwh: Mapped[float | None] = mapped_column(Float(precision=53))
+    starting_energy_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ending_energy_kwh: Mapped[float | None] = mapped_column(Float(precision=53))
+    ending_energy_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    energy_unit: Mapped[str] = mapped_column(String(8), nullable=False, default="kWh", server_default="kWh")
+    energy_consumed_kwh: Mapped[float | None] = mapped_column(Float(precision=53))
+    energy_status: Mapped[str] = mapped_column(String(16), nullable=False, default="UNAVAILABLE")
+    energy_reason_code: Mapped[str | None] = mapped_column(String(80))
+    energy_source: Mapped[str | None] = mapped_column(String(160))
+    energy_quality: Mapped[str | None] = mapped_column(String(24))
+    energy_simulated: Mapped[bool | None] = mapped_column(Boolean)
+    tariff_rate_per_kwh: Mapped[float | None] = mapped_column(Float(precision=53))
+    currency: Mapped[str | None] = mapped_column(String(3))
+    starting_tariff_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ending_tariff_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    tariff_source: Mapped[str | None] = mapped_column(String(160))
+    tariff_quality: Mapped[str | None] = mapped_column(String(24))
+    tariff_simulated: Mapped[bool | None] = mapped_column(Boolean)
+    cost_consumed: Mapped[float | None] = mapped_column(Float(precision=53))
+    cost_status: Mapped[str] = mapped_column(String(16), nullable=False, default="UNAVAILABLE")
+    cost_reason_code: Mapped[str | None] = mapped_column(String(80))
+    quality_state: Mapped[str] = mapped_column(String(24), nullable=False, default="VALID")
+    source: Mapped[str] = mapped_column(String(160), nullable=False)
+    simulated: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    reason: Mapped[str] = mapped_column(String(160), nullable=False)
+
+
 class IntegrationRecord(TimestampMixin, Base):
     __tablename__ = "integrations"
     __table_args__ = (UniqueConstraint("building_id", "name", name="uq_integrations_building_name"),)

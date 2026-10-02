@@ -355,7 +355,7 @@ export const api = {
   async getOptimizationIntervals(zoneId: string) {
     const res = await authFetch(`${API_BASE}/zones/${encodeURIComponent(zoneId)}/optimization-intervals`);
     if (!res.ok) await throwApiError(res, "Unable to load optimization interval status.");
-    return res.json() as Promise<{ active: OptimizationInterval | null; completed: OptimizationInterval[]; persistence: "PROCESS_LOCAL" }>;
+    return res.json() as Promise<{ active: OptimizationInterval | null; completed: OptimizationInterval[]; persistence: "DATABASE" }>;
   },
 
   async setManualOverride(zoneId: string, enabled: boolean) {
@@ -497,12 +497,25 @@ export interface KnowledgeResult {
 }
 
 export interface OptimizationInterval {
-  interval_id: string; zone_id: string; started_at: string; ended_at: string | null;
+  interval_id: string; organization_id: string | null; building_id: string | null;
+  floor_id: string | null; database_zone_id: string | null; zone_id: string;
+  started_at: string; ended_at: string | null;
   starting_occupancy: number; ending_occupancy: number | null; starting_temperature: number;
   ending_temperature: number | null; previous_setpoint: number; optimized_setpoint: number;
-  occupancy_observed_at: string | null; duration_seconds: number | null;
+  starting_occupancy_observed_at: string | null; ending_occupancy_observed_at: string | null;
+  setpoint_observed_at: string | null; starting_temperature_observed_at: string | null;
+  ending_temperature_observed_at: string | null; duration_seconds: number | null;
+  starting_energy_kwh: number | null; starting_energy_observed_at: string | null;
+  ending_energy_kwh: number | null; ending_energy_observed_at: string | null;
+  energy_unit: "kWh"; energy_status: "PENDING" | "AVAILABLE" | "UNAVAILABLE" | "INVALID";
+  energy_reason_code: string | null; energy_source: string | null; energy_quality: string | null;
+  energy_simulated: boolean | null;
   energy_consumed_kwh: number | null; cost_consumed: number | null;
   tariff_rate_per_kwh: number | null; currency: string | null;
+  starting_tariff_observed_at: string | null; ending_tariff_observed_at: string | null;
+  tariff_source: string | null; tariff_quality: string | null; tariff_simulated: boolean | null;
+  cost_status: "PENDING" | "AVAILABLE" | "UNAVAILABLE" | "INVALID";
+  cost_reason_code: string | null; quality_state: string;
   status: "ACTIVE" | "COMPLETED"; source: string; simulated: boolean;
-  energy_provenance: string | null; reason: string;
+  reason: string;
 }

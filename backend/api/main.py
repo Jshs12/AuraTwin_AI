@@ -72,6 +72,8 @@ from backend.database.repositories import SQLAlchemyUserRepository, SQLAlchemyOr
 from backend.database.configuration import SQLAlchemyConfigurationRepository
 from backend.telemetry.repository import SQLAlchemyTelemetryRepository
 from backend.telemetry.service import TelemetryPersistenceService, telemetry_query_max_limit
+from backend.optimization.interval_repository import SQLAlchemyOptimizationIntervalRepository
+from backend.services.optimization_intervals import OptimizationIntervalService
 from backend.telemetry.ingestion import ProviderObservationIngestionService
 from backend.telemetry.runtime_consumer import ZoneStateRuntimeConsumer
 from backend.schemas.telemetry import TelemetryAnalyticsResponse, TelemetrySignal
@@ -91,6 +93,10 @@ configuration_repository = SQLAlchemyConfigurationRepository(database_sessions)
 organization_repository = SQLAlchemyOrganizationRepository(database_sessions)
 telemetry_service = TelemetryPersistenceService(
     SQLAlchemyTelemetryRepository(database_sessions), configuration_repository,
+)
+optimization_interval_service = OptimizationIntervalService(
+    SQLAlchemyOptimizationIntervalRepository(database_sessions), telemetry_service,
+    configuration_repository,
 )
 
 @asynccontextmanager
@@ -227,7 +233,10 @@ recommendation_workflow = RecommendationWorkflow(provider=intelligence_provider_
 
 app.state.energy_stream_provider = MockEnergyStreamProvider(tariff_prov, EventBroadcaster)
 # Pass occ_prov (which has detect_from_image now)
-app.state.monitoring_scheduler = ZoneMonitoringScheduler(zone_state_service, recommendation_workflow, control_service, occ_prov)
+app.state.monitoring_scheduler = ZoneMonitoringScheduler(
+    zone_state_service, recommendation_workflow, control_service, occ_prov,
+    optimization_interval_service=optimization_interval_service,
+)
 app.state.demo_scenario = DemoScenarioEngine()
 app.state.zone_state_service = zone_state_service
 app.state.telemetry_service = telemetry_service
@@ -774,7 +783,7 @@ async def get_optimization_intervals(zone_id: str, _user=Depends(require_zone_pe
     active = service.active(runtime_zone_id)
     return {"active": active.model_dump(mode="json") if active else None,
             "completed": [item.model_dump(mode="json") for item in service.history(runtime_zone_id)],
-            "persistence": "PROCESS_LOCAL"}
+            "persistence": "DATABASE"}
 
 
 @app.get("/api/zones/{zone_id}/control-state")

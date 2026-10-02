@@ -117,6 +117,34 @@ class TelemetryPersistenceService:
             raise ValueError("Observation scope does not match persistent zone ownership")
         return self.repository.add_many([observation])
 
+    def find_persisted_boundary(self, *, zone_id: str, signal: TelemetrySignal, value: float,
+                                unit: str, observed_at: datetime, source: str,
+                                quality_state: str, simulated: bool) -> TelemetryObservation | None:
+        """Return an exact tenant-scoped persisted observation matching a runtime boundary.
+
+        A ZoneState snapshot alone is not evidence that telemetry was persisted.
+        This lookup deliberately requires the observation timestamp and its
+        provenance/quality/unit to match the record in the existing telemetry store.
+        """
+        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+            return None
+        scope = self.configuration_repository.telemetry_scope(zone_id)
+        if scope is None:
+            return None
+        candidates = self.repository.list_zone(
+            organization_id=scope["organization_id"], building_id=scope["building_id"],
+            zone_id=scope["database_zone_id"], start_at=observed_at, end_at=observed_at,
+            limit=25, signal=signal.value)
+        normalized_at = observed_at.astimezone(timezone.utc)
+        for observation in candidates:
+            if (observation.observed_at.astimezone(timezone.utc) == normalized_at
+                    and abs(observation.value - float(value)) <= 1e-9
+                    and observation.unit == unit and observation.source == source
+                    and observation.quality_state == quality_state
+                    and observation.simulated is simulated):
+                return observation
+        return None
+
     def list_zone(self, *, organization_id: str, building_id: str, zone_id: str,
                   start_at: datetime | None = None, end_at: datetime | None = None,
                   limit: int = 500, signal: str | None = None):

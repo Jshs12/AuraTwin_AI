@@ -117,7 +117,7 @@ def test_intervals_api_preserves_authentication_and_zone_building_scope():
     assert make_client(building_ids=set()).get(endpoint).status_code == 403
     response = make_client().get(endpoint)
     assert response.status_code == 200
-    assert response.json()["persistence"] == "PROCESS_LOCAL"
+    assert response.json()["persistence"] == "DATABASE"
     assert "active" in response.json() and "completed" in response.json()
 
 

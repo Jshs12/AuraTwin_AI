@@ -5,6 +5,13 @@ import { Timeline } from "../events/Timeline";
 import { CVPanel } from "../occupancy/CVPanel";
 import { api, ApiRequestError } from "../../services/api";
 
+function attributionMessage(reason: string | null, label: string) {
+  if (!reason) return `${label} unavailable — insufficient validated telemetry`;
+  if (reason.includes("TARIFF")) return `${label} unavailable — no valid tariff coverage`;
+  if (reason.includes("ENERGY")) return `${label} unavailable — no validated energy boundaries`;
+  return `${label} unavailable — insufficient validated telemetry`;
+}
+
 export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: string | null; demoPhase?: string | null; canOperate?: boolean }) {
   const [modeBusy, setModeBusy] = useState(false);
   const [modeError, setModeError] = useState<ApiRequestError | Error | null>(null);
@@ -272,18 +279,22 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
             <div><small>DURATION</small><strong>{Math.max(0, Math.floor((Date.now() - Date.parse(optimizationIntervals.active.started_at)) / 60000))} min</strong></div>
             <div><small>NEXT EVALUATION</small><strong>Waiting for next occupancy change</strong></div>
           </div>
-          <div className="interval-impact"><div><small>ENERGY CONSUMED</small><strong>{optimizationIntervals.active.energy_consumed_kwh == null ? "Impact unavailable — awaiting validated energy telemetry" : `${optimizationIntervals.active.energy_consumed_kwh.toFixed(3)} kWh`}</strong></div>
-            <div><small>COST CONSUMED</small><strong>{optimizationIntervals.active.cost_consumed == null ? "Awaiting validated telemetry" : `${optimizationIntervals.active.currency ?? ""} ${optimizationIntervals.active.cost_consumed.toFixed(3)}`}</strong></div>
+          <div className="interval-impact"><div><small>ENERGY CONSUMED</small><strong>{optimizationIntervals.active.energy_consumed_kwh == null ? attributionMessage(optimizationIntervals.active.energy_reason_code, "Energy impact") : `${optimizationIntervals.active.energy_consumed_kwh.toFixed(3)} kWh`}</strong></div>
+            <div><small>COST CONSUMED</small><strong>{optimizationIntervals.active.cost_consumed == null ? attributionMessage(optimizationIntervals.active.cost_reason_code, "Cost impact") : `${optimizationIntervals.active.currency ?? ""} ${optimizationIntervals.active.cost_consumed.toFixed(3)}`}</strong></div>
             {optimizationIntervals.active.simulated && <span className="badge warning">SIMULATED · NOT METER DATA</span>}
+            <span className="badge neutral">SAVINGS NOT YET MEASURABLE · NO VALIDATED COMPARISON BASELINE</span>
+            <small>Stored in database</small>
           </div>
         </article> : null}
         {optimizationIntervals?.completed.slice(0, 3).map(interval => <article className="optimization-interval-card completed-interval" key={interval.interval_id}>
           <div className="optimization-card-header"><div><p className="eyebrow">OPTIMIZATION COMPLETE</p><h2>{interval.starting_occupancy} → {interval.ending_occupancy ?? "—"} people</h2></div><span className="badge neutral">COMPLETED</span></div>
           <div className="interval-impact"><div><small>HVAC SETPOINT</small><strong>{interval.previous_setpoint.toFixed(1)}°C → {interval.optimized_setpoint.toFixed(1)}°C</strong></div>
             <div><small>DURATION</small><strong>{interval.duration_seconds == null ? "—" : `${Math.round(interval.duration_seconds / 60)} min`}</strong></div>
-            <div><small>ENERGY CONSUMED</small><strong>{interval.energy_consumed_kwh == null ? "Awaiting validated telemetry" : `${interval.energy_consumed_kwh.toFixed(3)} kWh`}</strong></div>
-            <div><small>COST CONSUMED</small><strong>{interval.cost_consumed == null ? "Awaiting validated telemetry" : `${interval.currency ?? ""} ${interval.cost_consumed.toFixed(3)}`}</strong></div>
-            {interval.simulated && <span className="badge warning">SIMULATED · NOT SAVINGS</span>}
+            <div><small>ENERGY CONSUMED</small><strong>{interval.energy_consumed_kwh == null ? attributionMessage(interval.energy_reason_code, "Energy impact") : `${interval.energy_consumed_kwh.toFixed(3)} kWh`}</strong></div>
+            <div><small>COST CONSUMED</small><strong>{interval.cost_consumed == null ? attributionMessage(interval.cost_reason_code, "Cost impact") : `${interval.currency ?? ""} ${interval.cost_consumed.toFixed(3)}`}</strong></div>
+            <div><small>SAVINGS</small><strong>Not yet measurable — no validated comparison baseline</strong></div>
+            <div><small>COMPLETED</small><strong>{interval.ended_at ? new Date(interval.ended_at).toLocaleString() : "—"}</strong></div>
+            {interval.simulated && <span className="badge warning">SIMULATED · NOT METER DATA</span>}
           </div>
         </article>)}
       </section>

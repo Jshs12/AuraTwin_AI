@@ -60,7 +60,7 @@ class SceneChangeDetector:
 
 
 class ZoneMonitoringScheduler:
-    def __init__(self, state_service: ZoneStateService, workflow: RecommendationWorkflow, control_service: ControlService, yolo_provider: YOLOOccupancyProvider, energy_telemetry: BuildingEnergyTelemetry | None = None):
+    def __init__(self, state_service: ZoneStateService, workflow: RecommendationWorkflow, control_service: ControlService, yolo_provider: YOLOOccupancyProvider, energy_telemetry: BuildingEnergyTelemetry | None = None, optimization_interval_service: OptimizationIntervalService | None = None):
         self.state_service = state_service
         self.workflow = workflow
         self.control_service = control_service
@@ -102,16 +102,14 @@ class ZoneMonitoringScheduler:
         self.demo_current_states: dict[str, Any] = {}
         self.demo_control_activity: dict[str, dict] = {}
         self.energy_telemetry = energy_telemetry or BuildingEnergyTelemetry()
-        self.optimization_intervals = OptimizationIntervalService()
+        self.optimization_intervals = optimization_interval_service or OptimizationIntervalService()
 
-    def start_optimization_interval(self, state, previous_setpoint: float, optimized_setpoint: float):
-        scope = None
-        repository = self.state_service.configuration_repository
-        if repository is not None:
-            scope = repository.resolve_zone(state.zone.zone_id)
+    def start_optimization_interval(self, state, previous_setpoint: float, optimized_setpoint: float,
+                                    applied_at=None):
+        # The persistent interval service resolves authoritative organization,
+        # building, floor, and database-zone IDs through the existing config repo.
         return self.optimization_intervals.start(state, previous_setpoint, optimized_setpoint,
-            organization_id=getattr(scope, "organization_id", None),
-            building_id=getattr(scope, "building_id", None), floor_id=getattr(scope, "floor_id", None))
+                                                 started_at=applied_at)
 
     def start(self):
         if self._running:
@@ -282,9 +280,16 @@ class ZoneMonitoringScheduler:
                 if detailed_apply is not None:
                     result = detailed_apply(decision.validation, zstate)
                     if result.success and result.applied_setpoint is not None:
-                        self.start_optimization_interval(zstate,
+                        try:
+                            post_control_state = self.state_service.get_zone_state(zone_id)
+                        except Exception:
+                            # Preserve the successful command lifecycle, while the
+                            # pre-write observations remain ineligible as boundaries.
+                            post_control_state = zstate
+                        self.start_optimization_interval(post_control_state,
                             result.previous_setpoint if result.previous_setpoint is not None
-                            else zstate.hvac_status.present_value, result.applied_setpoint)
+                            else zstate.hvac_status.present_value, result.applied_setpoint,
+                            applied_at=result.timestamp)
                 else:
                     # Backward-compatible adapter path. Older implementations
                     # return only a boolean and cannot provide enough evidence
@@ -356,9 +361,14 @@ class ZoneMonitoringScheduler:
                 }
                 self.demo_control_activity[zone_id] = activity
                 if result.success and result.applied_setpoint is not None:
-                    self.start_optimization_interval(state,
+                    try:
+                        post_control_state = self.state_service.get_zone_state(
+                            zone_id, occupancy_override=occupancy)
+                    except Exception:
+                        post_control_state = state
+                    self.start_optimization_interval(post_control_state,
                         result.previous_setpoint or state.hvac_status.present_value,
-                        result.applied_setpoint)
+                        result.applied_setpoint, applied_at=result.timestamp)
                 EventTrace.log_event("DEMO_CONTROL_ACTIVITY", zone_id, "demo_scenario", activity,
                                      status="SUCCESS" if result.success else "FAILED")
             advance = getattr(self.state_service.control_provider, "advance_simulation", None)
