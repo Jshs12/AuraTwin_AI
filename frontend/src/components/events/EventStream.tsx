@@ -1,6 +1,7 @@
 import type { SystemEvent } from "../../types/api";
 import { formatISTTimestamp } from "../../utils/time";
 import { useMemo, useState } from "react";
+import type { CSSProperties } from "react";
 
 interface EventStreamProps {
   events: SystemEvent[];
@@ -44,10 +45,10 @@ const eventColors: Record<string, string> = {
   RUNTIME_OBSERVATION_REJECTED: "#ff6b6b",
 };
 
-const eventGroups = ["All", "Occupancy", "Intelligence", "HVAC", "Energy", "Safety", "System"] as const;
+const eventGroups = ["All", "Occupancy", "Optimization", "HVAC", "Energy", "Safety", "System"] as const;
 function eventGroup(type: string): typeof eventGroups[number] {
   if (/OCCUPANCY|YOLO|SNAPSHOT|SCENE/.test(type)) return "Occupancy";
-  if (/RECOMMENDATION|OPTIMIZATION|FALLBACK|INTELLIGENCE/.test(type)) return "Intelligence";
+  if (/OPTIMIZATION|RECOMMENDATION|FALLBACK|INTELLIGENCE/.test(type)) return "Optimization";
   if (/SAFETY|FAIL_SAFE|OVERRIDE|BLOCKED|PROVIDER_FAILURE/.test(type)) return "Safety";
   if (/ENERGY|TARIFF/.test(type)) return "Energy";
   if (/CONTROL|HVAC/.test(type)) return "HVAC";
@@ -56,6 +57,14 @@ function eventGroup(type: string): typeof eventGroups[number] {
 
 function getPayloadSummary(event: SystemEvent): string {
   const p = event.payload as Record<string, unknown>;
+  if (event.event_type === "OPTIMIZATION_COMPLETED") {
+    const energy = typeof p.energy_consumed_kwh === "number" ? `${p.energy_consumed_kwh.toFixed(3)} kWh consumed` : "energy impact unavailable";
+    return `${typeof p.duration_seconds === "number" ? `${Math.round(p.duration_seconds / 60)} min · ` : ""}${energy}${p.simulated === true ? " · SIMULATED" : ""}`;
+  }
+  if (event.event_type === "ENERGY_IMPACT_CALCULATED" && typeof p.energy_consumed_kwh === "number")
+    return `${p.energy_consumed_kwh.toFixed(3)} kWh consumed${p.simulated === true ? " · SIMULATED" : ""}`;
+  if (event.event_type === "ENERGY_IMPACT_UNAVAILABLE" || event.event_type === "IMPACT_UNAVAILABLE")
+    return "Validated telemetry coverage unavailable; no impact value was estimated.";
   if (event.event_type === "SNAPSHOT_CAPTURED" && typeof p.size === "number")
     return `${p.size} bytes`;
   if (event.event_type === "SCENE_CHANGED" && typeof p.score === "number")
@@ -79,12 +88,16 @@ function getPayloadSummary(event: SystemEvent): string {
   if (event.event_type === "CONTROL_VALIDATION" && typeof p.outcome === "string")
     return `safety: ${p.outcome}`;
   if (event.event_type === "RECOMMENDATION_REJECTED" || event.event_type === "CONTROL_REJECTED" || event.event_type === "COMMAND_BLOCKED_BY_OVERRIDE" || event.event_type === "COMMAND_BLOCKED_BY_CONTROL_DISABLE")
-    return `REJECTED · not applied${typeof p.reason === "string" ? ` · ${p.reason}` : typeof p.reason_code === "string" ? ` · ${p.reason_code}` : ""}`;
+    return `Not applied · ${typeof p.reason === "string" ? p.reason : typeof p.reason_code === "string" ? p.reason_code.replaceAll("_", " ").toLowerCase() : "safety validation did not pass"}`;
   if (event.event_type === "CONTROL_ACKNOWLEDGED" && typeof p.acknowledged === "boolean")
     return p.acknowledged ? `applied ${p.applied_setpoint}°C` : `not acknowledged · ${p.error_code ?? "failed"}`;
   if (event.event_type === "HVAC_RESPONSE" && typeof p.hvac_mode === "string")
-    return `${p.hvac_mode} · ${p.power_kw ?? 0} kW`;
-  return Object.entries(p).slice(0, 2).map(([k, v]) => `${k}: ${v}`).join(" · ");
+    return `${p.hvac_mode}${typeof p.power_kw === "number" ? ` · ${p.power_kw.toFixed(2)} kW` : ""}`;
+  return typeof p.message === "string" ? p.message : "System state recorded.";
+}
+
+function readableEvent(type: string) {
+  return type.toLowerCase().split("_").filter(Boolean).map(part => part[0].toUpperCase() + part.slice(1)).join(" ");
 }
 
 export function EventStream({ events, connectionStatus = "disconnected" }: EventStreamProps) {
@@ -94,7 +107,7 @@ export function EventStream({ events, connectionStatus = "disconnected" }: Event
   if (events.length === 0) {
     return (
       <div className="card">
-        <div className="card-title">LIVE EVENT STREAM</div>
+        <div className="card-title">BUILDING ACTIVITY</div>
         <div className={`badge ${live ? "success" : "warning"}`} role="status">EVENT CONNECTION · {connectionStatus.replace(/-/g, " ").toUpperCase()}</div>
         <div style={{ color: "var(--text-muted)", fontSize: "0.85rem", marginTop: "0.5rem", textAlign: "center", padding: "2rem" }}>
           No events yet — start monitoring to see the live stream.
@@ -105,43 +118,27 @@ export function EventStream({ events, connectionStatus = "disconnected" }: Event
 
   return (
     <div className="card">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
-        <div className="card-title" style={{ marginBottom: 0 }}>LIVE EVENT STREAM</div>
+      <div className="event-heading">
+        <div><div className="card-title" style={{ marginBottom: 0 }}>BUILDING ACTIVITY</div><h2>Event timeline</h2></div>
         <span className={`badge ${live ? "success" : "warning"}`} style={{ fontSize: "0.7rem" }}>● {live ? "LIVE" : connectionStatus.replace(/-/g, " ").toUpperCase()} · {events.length} events</span>
       </div>
       <div className="event-filters" role="group" aria-label="Filter event groups">
         {eventGroups.map(group => <button type="button" key={group} aria-pressed={selectedGroup === group} onClick={() => setSelectedGroup(group)}>{group}</button>)}
       </div>
-      <div style={{ maxHeight: 420, overflowY: "auto", display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+      <div className="event-timeline" aria-label="Recent event timeline">
         {visibleEvents.length === 0 ? <div className="product-empty-state">No {selectedGroup === "All" ? "events" : `${selectedGroup.toLowerCase()} events`} in this view.</div> : visibleEvents.map(event => {
           const color = eventColors[event.event_type] ?? "var(--text-secondary)";
           const time = formatISTTimestamp(event.timestamp);
           return (
-            <div key={event.event_id} style={{
-              display: "grid",
-              gridTemplateColumns: "60px 140px 1fr auto auto",
-              gap: "0.5rem",
-              alignItems: "center",
-              padding: "0.3rem 0.5rem",
-              background: "var(--surface-elevated)",
-              borderRadius: 5,
-              borderLeft: `3px solid ${color}`,
-              fontSize: "0.75rem"
-            }}>
-              <div style={{ color: "var(--text-muted)", fontFamily: "monospace" }}>{time}</div>
-              <div style={{ color, fontWeight: 600, fontSize: "0.7rem", letterSpacing: "0.02em" }}>
-                {event.event_type}
+            <article key={event.event_id} className="event-timeline-item" style={{ "--event-color": color } as CSSProperties}>
+              <time dateTime={event.timestamp}>{time}</time>
+              <i aria-hidden="true" />
+              <div className="event-timeline-copy">
+                <div className="event-timeline-title"><strong>{readableEvent(event.event_type)}</strong><span>{event.zone_id.replace(/_/g, " ")}</span></div>
+                <p>{getPayloadSummary(event)}</p>
+                <small>{event.source}{((event.payload as Record<string, unknown>).simulated === true) ? " · SIMULATED" : ""}</small>
               </div>
-              <div style={{ color: "var(--text-secondary)", fontSize: "0.7rem" }}>
-                {getPayloadSummary(event)}
-              </div>
-              <div style={{ color: "var(--text-muted)", fontSize: "0.65rem" }}>
-                {event.source}{((event.payload as Record<string, unknown>).simulated === true) ? " · SIMULATED" : ""}
-              </div>
-              <div style={{ color: "var(--text-muted)", fontSize: "0.65rem" }}>
-                {event.zone_id.replace(/_/g, " ")}
-              </div>
-            </div>
+            </article>
           );
         })}
       </div>

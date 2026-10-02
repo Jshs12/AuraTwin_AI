@@ -7,12 +7,13 @@ interface TopNavProps {
   occupancyProvider: "mock" | "yolo" | "unknown";
   occupancyProviderReady: boolean;
   role: "ADMIN" | "OPERATOR";
+  systemOnline: boolean;
 }
 
-export function TopNav({ activeSection, onNavigate, monitoringRunning, wsConnected, demoSimulation, occupancyProvider, occupancyProviderReady, role }: TopNavProps) {
+export function TopNav({ activeSection, onNavigate, monitoringRunning, wsConnected, demoSimulation, occupancyProvider, occupancyProviderReady, role, systemOnline }: TopNavProps) {
   const groups = [
-    { label: "Operations", sections: ["Overview", "Zones", "Occupancy", "Energy"] },
-    { label: "Intelligence", sections: ["Knowledge", "Events"] },
+    { label: "Operations", sections: ["Overview", "Zones", "Occupancy", "Energy", "Events"] },
+    { label: "Intelligence", sections: ["Knowledge"] },
     { label: "Configuration", sections: [...(role === "OPERATOR" ? ["Integrations"] : []), "Access", ...(role === "ADMIN" ? ["Audit"] : [])] },
   ];
   const occupancyLabel = demoSimulation
@@ -22,8 +23,8 @@ export function TopNav({ activeSection, onNavigate, monitoringRunning, wsConnect
       : occupancyProvider === "mock" ? "MOCK SIMULATED" : "UNKNOWN";
 
   return (
-    <nav className="top-nav">
-      <div style={{ display: "flex", alignItems: "center", gap: "2rem" }}>
+    <nav className="top-nav" aria-label="Primary navigation">
+      <div className="top-nav-main">
         <div className="brand">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <rect x="2" y="2" width="9" height="9" rx="1" fill="#1f6feb" />
@@ -63,6 +64,7 @@ export function TopNav({ activeSection, onNavigate, monitoringRunning, wsConnect
       </div>
 
       <div className="nav-status">
+        <span className={`system-online ${systemOnline ? "is-online" : "is-offline"}`}><i aria-hidden="true" />{systemOnline ? "SYSTEM ONLINE" : "STATUS UNAVAILABLE"}</span>
         {/* Monitoring status indicator */}
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
           <span style={{
@@ -78,8 +80,8 @@ export function TopNav({ activeSection, onNavigate, monitoringRunning, wsConnect
           }}>
             {monitoringRunning ? "MONITORING" : "STOPPED"}
           </span>
-          <span style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
-            · WS {wsConnected ? "●" : "○"}
+          <span className={`connection-label ${wsConnected ? "connected" : ""}`} aria-label={`Event stream ${wsConnected ? "connected" : "disconnected"}`}>
+            · EVENTS {wsConnected ? "LIVE" : "OFFLINE"}
           </span>
         </div>
 
@@ -92,10 +94,10 @@ export function TopNav({ activeSection, onNavigate, monitoringRunning, wsConnect
           borderLeft: "1px solid var(--border-color)",
           paddingLeft: "1rem",
         }}>
-          <span>Occupancy: <span style={{ color: "var(--accent-hover)" }}>{occupancyLabel}</span></span>
-          <span>Energy: <span style={{ color: "var(--accent-orange)" }}>SIMULATED</span></span>
-          <span>HVAC: <span style={{ color: "var(--accent-orange)" }}>SIMULATED</span></span>
-          <span>Optimizer: <span style={{ color: "var(--text-secondary)" }}>DETERMINISTIC</span></span>
+          <span>Occupancy <b>{occupancyLabel}</b></span>
+          <span>Energy <b>SIMULATED</b></span>
+          <span>HVAC <b>SIMULATED</b></span>
+          <span>Optimizer <b>DETERMINISTIC</b></span>
         </div>
       </div>
     </nav>

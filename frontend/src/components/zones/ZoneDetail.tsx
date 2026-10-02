@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useZoneState } from "../../hooks/useZoneState";
-import { Card, OccupancyBadge, Button } from "../common";
+import { Card, OccupancyBadge, Button, ErrorState } from "../common";
 import { Timeline } from "../events/Timeline";
 import { CVPanel } from "../occupancy/CVPanel";
 import { api, ApiRequestError } from "../../services/api";
@@ -48,17 +48,17 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
   }
 
   if (loading && !state) {
-    return <Card><div style={{ color: "var(--text-muted)" }}>Loading zone data...</div></Card>;
+    return <div className="zone-detail-skeleton" aria-label="Loading zone details"><span /><span /><span /><span /></div>;
   }
 
   if (error || !state) {
-    return (
-      <Card>
-        <div style={{ color: "var(--accent-red)", fontSize: "0.875rem" }}>
-          {error || "Unable to connect to AuraTwin backend."}
-        </div>
-      </Card>
-    );
+    const title = error?.includes("403") ? "This account cannot access the selected zone"
+      : error?.includes("404") ? "This zone is no longer available"
+      : error?.includes("401") ? "Your session needs attention"
+      : "Zone information is unavailable";
+    return <ErrorState title={title} onRetry={() => void refresh()} details={<code>{error || "No zone state was returned."}</code>}>
+      The current zone snapshot could not be loaded. Existing control remains governed by the backend safety checks.
+    </ErrorState>;
   }
 
   const { zone, occupancy, temperature, energy, tariff, hvac_status } = state;
@@ -201,10 +201,13 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
           <div style={{ fontSize: "0.7rem", color: "var(--text-muted)", marginTop: "0.35rem" }}>
             Manual override pauses AuraTwin commands; it does not send a manual HVAC setpoint.
           </div>
-          {!controlMode?.control_enabled && policyStatus && !policyStatus.ready && <div role="status" style={{ marginTop: ".5rem", borderLeft: "3px solid var(--warning, #d29922)", padding: ".65rem", background: "var(--surface-elevated)", borderRadius: 6 }}>
-            <strong>CONTROL UNAVAILABLE</strong><br />Safety command-limit policy is {policyStatus.reason_code === "COMMAND_POLICY_INCOMPLETE" ? "incomplete" : "invalid"}.
-            {!!policyStatus.missing_configuration.length && <><br />Missing: {policyStatus.missing_configuration.join(", ")}</>}
-            {!!policyStatus.invalid_configuration.length && <><br />Invalid: {policyStatus.invalid_configuration.join(", ")}</>}
+          {!controlMode?.control_enabled && policyStatus && !policyStatus.ready && <div className="safety-lock-panel" role="status">
+            <strong>🔒 HVAC CONTROL LOCKED</strong>
+            <p>AuraTwin has paused automatic HVAC control because the required safety policy is not fully configured.</p>
+            <details><summary>View safety details</summary><div className="safety-technical"><span>Safety command-limit policy is {policyStatus.reason_code === "COMMAND_POLICY_INCOMPLETE" ? "incomplete" : "invalid"}.</span>
+              {!!policyStatus.missing_configuration.length && <span>Missing: {policyStatus.missing_configuration.join(", ")}</span>}
+              {!!policyStatus.invalid_configuration.length && <span>Invalid: {policyStatus.invalid_configuration.join(", ")}</span>}
+            </div></details>
           </div>}
           {!controlMode?.control_enabled && !policyStatus && canOperate && <div role="status" style={{ marginTop: ".5rem", color: "var(--text-muted)" }}>
             Control readiness could not be verified. Re-enable remains disabled until the backend policy status is available.
@@ -213,13 +216,17 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
             role={modeError instanceof ApiRequestError && modeError.code ? "status" : "alert"}
             style={{ marginTop: "0.5rem", ...(modeError instanceof ApiRequestError && modeError.code ? { borderLeft: "3px solid var(--warning, #d29922)", padding: ".65rem", background: "var(--surface-elevated)", borderRadius: 6 } : {}) }}>
             {modeError instanceof ApiRequestError && modeError.code === "COMMAND_POLICY_INCOMPLETE" ? <>
-              <strong>CONTROL UNAVAILABLE</strong><br />Safety command-limit policy is incomplete.
-              {!!modeError.missingConfiguration?.length && <><br />Missing configuration: {modeError.missingConfiguration.join(", ")}</>}
-              {modeError.status && <><br /><small>HTTP {modeError.status} · {modeError.endpoint}</small></>}
+              <strong>🔒 HVAC CONTROL LOCKED</strong><br />AuraTwin cannot enable automatic control until its required safety limits are configured.
+              <details><summary>View safety details</summary><div className="safety-technical">
+                {!!modeError.missingConfiguration?.length && <span>Missing: {modeError.missingConfiguration.join(", ")}</span>}
+                {modeError.status && <small>HTTP {modeError.status} · {modeError.endpoint}</small>}
+              </div></details>
             </> : modeError instanceof ApiRequestError && modeError.code === "COMMAND_POLICY_INVALID" ? <>
-              <strong>CONTROL UNAVAILABLE</strong><br />Safety command-limit policy is invalid.
-              {!!modeError.invalidConfiguration?.length && <><br />Invalid configuration: {modeError.invalidConfiguration.join(", ")}</>}
-              {modeError.status && <><br /><small>HTTP {modeError.status} · {modeError.endpoint}</small></>}
+              <strong>🔒 HVAC CONTROL LOCKED</strong><br />The configured safety command limits need correction before control can be enabled.
+              <details><summary>View safety details</summary><div className="safety-technical">
+                {!!modeError.invalidConfiguration?.length && <span>Invalid: {modeError.invalidConfiguration.join(", ")}</span>}
+                {modeError.status && <small>HTTP {modeError.status} · {modeError.endpoint}</small>}
+              </div></details>
             </> : modeError instanceof ApiRequestError && modeError.code ? <><strong>{modeError.code.replaceAll("_", " ")}</strong><br />{modeError.message}</> : <>{modeError.message}</>}
           </div>}
           {controlResult && (
@@ -298,7 +305,7 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
           </div>
         </article>)}
       </section>
-      <Card title="Recommendation · advisory and safety checked">
+      <Card title="AI recommendation · safety checked">
               {recommendation ? (
           <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
             <div className="zone-stats">
@@ -312,7 +319,7 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
                   {recommendation.validation.validated_setpoint?.toFixed(1) ?? "—"}{recommendation.validation.validated_setpoint !== null ? "°C" : ""}
                 </div>
                 <span className={`badge ${recommendation.validation.outcome === "REJECTED" ? "danger" : "success"}`}>
-                  {recommendation.validation.outcome}
+                  {recommendation.validation.outcome === "REJECTED" ? "PAUSED · SAFETY CHECK" : recommendation.validation.outcome}
                 </span>
               </div>
               <div>
@@ -338,7 +345,15 @@ export function ZoneDetail({ zoneId, demoPhase, canOperate = true }: { zoneId: s
                   ? ` · ${recommendation.intelligence_recommendation.provider} · confidence ${recommendation.intelligence_recommendation.confidence}` : ""}
               </div>
               {recommendation.validation.fallback_reason && <div className="badge warning">Fallback: {recommendation.validation.fallback_reason}</div>}
-              {recommendation.validation.rejection_reason && <div className="optimization-rejected" role="status"><strong>OPTIMIZATION REJECTED</strong><span>{recommendation.validation.rejection_reason}</span></div>}
+              {recommendation.validation.rejection_reason && <div className="optimization-rejected" role="status">
+                <strong>OPTIMIZATION PAUSED</strong>
+                <span>{recommendation.validation.rejection_reason.includes("OCCUPANCY")
+                  ? "AuraTwin is waiting for a valid occupancy observation."
+                  : recommendation.validation.rejection_reason.includes("TEMPERATURE")
+                    ? "AuraTwin is waiting for a valid temperature observation."
+                    : "This recommendation did not pass the required safety checks."}</span>
+                <details><summary>View technical reason</summary><code>{recommendation.validation.rejection_reason}</code></details>
+              </div>}
             </div>
 
             {canOperate && <Button variant={controlBlockedReason || recommendation.validation.validated_setpoint === null ? "neutral" : "primary"} onClick={applyRecommendation} disabled={loading || recommendation.validation.validated_setpoint === null || Boolean(controlBlockedReason)}>

@@ -18,22 +18,32 @@ export function EnergyChart({ history, demoMode = false }: EnergyChartProps) {
   const minPower = Math.min(0, ...values);
   const maxPower = Math.max(1, ...values) * 1.08;
   const range = Math.max(maxPower - minPower, 1);
-  const polyline = points.map((p, i) => {
+  const chartPoints = points.map((p, i) => {
     const x = (i / Math.max(points.length - 1, 1)) * WIDTH;
     const y = HEIGHT - ((p.power_kw - minPower) / range) * HEIGHT;
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(" ");
+    return { x, y };
+  });
+  const linePath = chartPoints.reduce((path, point, index) => {
+    if (index === 0) return `M ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
+    const previous = chartPoints[index - 1];
+    const middleX = ((previous.x + point.x) / 2).toFixed(2);
+    const middleY = ((previous.y + point.y) / 2).toFixed(2);
+    return `${path} Q ${previous.x.toFixed(2)} ${previous.y.toFixed(2)} ${middleX} ${middleY}`;
+  }, "");
+  const lastChartPoint = chartPoints.at(-1);
+  const areaPath = chartPoints.length ? `${linePath} L ${WIDTH} ${HEIGHT} L 0 ${HEIGHT} Z` : "";
 
   return (
     <div className="card">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "0.75rem" }}>
         <div>
-          <div className="card-title">{demoMode ? "DETERMINISTIC DEMO ENERGY" : "MOCK ENERGY STREAM"}</div>
-          <div style={{ marginTop: "0.25rem" }}>
-            <span className="badge warning">
-              {demoMode
-                ? "Power responds to simulated occupancy and HVAC · not meter data"
-                : "Illustrative deterministic stream · not meter data"}
+        <div className="card-title">LIVE ENERGY LOAD</div>
+        <h2 className="energy-chart-title">Power trend <span>kW</span></h2>
+        <div style={{ marginTop: "0.25rem" }}>
+          <span className="badge warning">
+            {demoMode
+                ? "DEMO SIMULATION · NOT METER DATA"
+                : "SIMULATED TELEMETRY · NOT METER DATA"}
             </span>
           </div>
         </div>
@@ -62,33 +72,24 @@ export function EnergyChart({ history, demoMode = false }: EnergyChartProps) {
       {/* SVG chart; point titles expose timestamp, power, energy and occupancy on hover. */}
       <div style={{ background: "var(--surface-elevated)", borderRadius: 8, padding: "0.5rem", overflow: "hidden" }}>
         {points.length < 2 ? (
-          <div style={{ height: 80, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: "0.8rem" }}>
-            Waiting for energy data...
+          <div className="energy-empty" role="status">
+            <span aria-hidden="true">⌁</span><strong>No energy samples yet</strong>
+            <small>Start monitoring or run the demo simulation to see the simulated power stream.</small>
           </div>
         ) : (
-          <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} preserveAspectRatio="none" role="img" aria-label={`Power trend across ${points.length} recent samples`} style={{ width: "100%", height: 110 }}>
+          <svg className="energy-svg" viewBox={`0 0 ${WIDTH} ${HEIGHT}`} preserveAspectRatio="none" role="img" aria-label={`Power trend across ${points.length} recent samples`}>
+            <defs><linearGradient id="energy-fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="var(--accent-blue)" stopOpacity=".34"/><stop offset="100%" stopColor="var(--accent-blue)" stopOpacity="0"/></linearGradient></defs>
             {/* Grid lines */}
             {[0, 0.25, 0.5, 0.75, 1].map(t => (
               <line key={t} x1={0} y1={HEIGHT * t} x2={WIDTH} y2={HEIGHT * t}
                 stroke="var(--border)" strokeWidth="0.3" />
             ))}
             {/* Area fill */}
-            <polyline
-              points={`0,${HEIGHT} ${polyline} ${WIDTH},${HEIGHT}`}
-              fill="var(--accent)"
-              fillOpacity="0.12"
-              stroke="none"
-            />
+            <path d={areaPath} fill="url(#energy-fill)" stroke="none" />
             {/* Line */}
-            <polyline
-              points={polyline}
-              fill="none"
-              stroke="var(--accent)"
-              strokeWidth="1.5"
-              strokeLinejoin="round"
-            />
+            <path d={`${linePath} L ${WIDTH} ${lastChartPoint?.y ?? HEIGHT}`} fill="none" stroke="var(--accent-blue)" strokeWidth="1.7" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
             {points.map((point, index) => {
-              const x = (index / Math.max(points.length - 1, 1)) * WIDTH;
+              const x = chartPoints[index].x;
               const y = HEIGHT - ((point.power_kw - minPower) / range) * HEIGHT;
               return <circle key={`${point.timestamp}-${index}`} cx={x} cy={y} r="1.2" fill="var(--accent)" opacity="0.8">
                 <title>{`${point.time} · ${point.power_kw.toFixed(2)} kW${point.energy_kwh === undefined ? "" : ` · ${point.energy_kwh.toFixed(3)} kWh`}${point.occupancy === undefined ? "" : ` · ${point.occupancy} occupants`}`}</title>
@@ -110,7 +111,7 @@ export function EnergyChart({ history, demoMode = false }: EnergyChartProps) {
       </div>}
 
       <div style={{ marginTop: "0.5rem", fontSize: "0.65rem", color: "var(--text-muted)", textAlign: "right" }}>
-        Showing {points.length} of up to {windowSize} recent {demoMode ? "building simulation samples" : "illustrative samples"} · all summary metrics use this window
+        Showing {points.length} recent samples · metrics use this window · {demoMode ? "DEMO SIMULATION" : "SIMULATED STREAM"}
       </div>
     </div>
   );

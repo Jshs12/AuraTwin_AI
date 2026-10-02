@@ -5,7 +5,6 @@ import { TopNav } from "../components/layout/TopNav";
 import { ZoneList } from "../components/zones/ZoneList";
 import { ZoneDetail } from "../components/zones/ZoneDetail";
 import { CVPanel } from "../components/occupancy/CVPanel";
-import { Summary } from "../components/dashboard/Summary";
 import { MonitoringPanel } from "../components/monitoring/MonitoringPanel";
 import { EnergyChart } from "../components/energy/EnergyChart";
 import { HistoricalTelemetry } from "../components/energy/HistoricalTelemetry";
@@ -22,6 +21,7 @@ import { KnowledgePanel } from "../components/knowledge/KnowledgePanel";
 import { BuildingCommandCenter } from "../components/dashboard/BuildingCommandCenter";
 import { defaultZoneSelection } from "../utils/zoneSelection";
 import type { OptimizationInterval } from "../services/api";
+import { ErrorState } from "../components/common";
 
 type Section = "Overview" | "Zones" | "Occupancy" | "Energy" | "Knowledge" | "Events" | "Integrations" | "Access" | "Audit";
 
@@ -32,13 +32,19 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
   const [buildings, setBuildings] = useState<Array<{ building_id: string; building_key: string; organization_id: string; name: string }>>([]);
   const [selectedBuildingId, setSelectedBuildingId] = useState<string | undefined>();
   const [buildingsError, setBuildingsError] = useState("");
+  const [buildingsLoading, setBuildingsLoading] = useState(true);
   const [activeIntervals, setActiveIntervals] = useState<OptimizationInterval[]>([]);
+  const [completedIntervals, setCompletedIntervals] = useState<OptimizationInterval[]>([]);
 
   const refreshBuildings = useCallback(async () => {
-    const items = await api.getBuildings();
-    setBuildings(items);
-    setSelectedBuildingId(current => current && items.some(item => item.building_id === current)
-      ? current : items[0]?.building_id);
+    setBuildingsLoading(true);
+    setBuildingsError("");
+    try {
+      const items = await api.getBuildings();
+      setBuildings(items);
+      setSelectedBuildingId(current => current && items.some(item => item.building_id === current)
+        ? current : items[0]?.building_id);
+    } finally { setBuildingsLoading(false); }
   }, []);
   useEffect(() => {
     refreshBuildings().catch(err => {
@@ -51,7 +57,7 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
   const monitoring = useMonitoring();
 
   // Zone configuration is persistent and scoped to the selected authorized building.
-  const { zones, loading: zonesLoading, error: zonesError } = useZones(selectedBuildingId);
+  const { zones, loading: zonesLoading, error: zonesError, refresh: refreshZones } = useZones(selectedBuildingId);
   useEffect(() => {
     const nextSelection = defaultZoneSelection(zones, selectedZoneId);
     if (nextSelection !== selectedZoneId) setSelectedZoneId(nextSelection);
@@ -60,7 +66,10 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
     let active = true;
     const refreshIntervals = async () => {
       const results = await Promise.all(zones.map(zone => api.getOptimizationIntervals(zone.zone_id).catch(() => null)));
-      if (active) setActiveIntervals(results.flatMap(result => result?.active ? [result.active] : []));
+      if (active) {
+        setActiveIntervals(results.flatMap(result => result?.active ? [result.active] : []));
+        setCompletedIntervals(results.flatMap(result => result?.completed ?? []).sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at)));
+      }
     };
     if (zones.length) void refreshIntervals(); else setActiveIntervals([]);
     const timer = window.setInterval(() => { if (zones.length) void refreshIntervals(); }, 10000);
@@ -74,7 +83,11 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
         power_kw: sample.power_kw, energy_kwh: sample.energy_kwh, occupancy: sample.occupancy, zone_id: "building",
       }))
     : monitoring.energyHistory;
-  const displayPower = demoSummary?.scenario_id ? demoSummary.simulated_power_kw : monitoring.currentPower;
+  const displayPower = demoSummary?.scenario_id ? demoSummary.simulated_power_kw
+    : energyHistory.length ? energyHistory.at(-1)!.power_kw : null;
+  const occupancySnapshots = monitoring.status?.zones.filter(item => item.last_snapshot) ?? [];
+  const currentOccupancy = occupancySnapshots.length
+    ? occupancySnapshots.reduce((sum, item) => sum + item.last_people_count, 0) : null;
 
   return (
     <div className="app-shell">
@@ -87,10 +100,14 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
         occupancyProvider={monitoring.status?.occupancy_provider ?? "unknown"}
         occupancyProviderReady={monitoring.status?.occupancy_provider_ready ?? false}
         role={role}
+        systemOnline={Boolean(monitoring.status) && !monitoring.error}
       />
 
       <main className="main-content">
-        {buildingsError && <div className="demo-error" role="alert">{buildingsError}</div>}
+        {buildingsError && <ErrorState title="Building information is unavailable" onRetry={() => void refreshBuildings()} details={<code>{buildingsError}</code>}>
+          Your authorized building list could not be loaded.
+        </ErrorState>}
+        {buildingsLoading && <div className="overview-skeleton" aria-label="Loading building overview"><span /><span /><span /><span /></div>}
         {buildings.length > 1 && <label className="building-selector">
           Building
           <select value={selectedBuildingId} onChange={event => {
@@ -108,16 +125,13 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
               zones={zones} status={monitoring.status} events={monitoring.events}
               power={displayPower} energyHistory={energyHistory} demoSummary={demoSummary}
               activeIntervals={activeIntervals}
+              latestCompleted={completedIntervals[0] ?? null}
+            />
+            <EnergyChart
+              history={energyHistory}
+              demoMode={Boolean(demoSummary?.scenario_id)}
             />
             {role === "OPERATOR" && <DemoModePanel onSummary={updateDemoSummary} />}
-            <Summary
-              zones={zones}
-              totalOccupancy={monitoring.totalOccupancy}
-              occupiedZones={monitoring.occupiedZones}
-              monitoringStatus={monitoring.status}
-              currentPower={displayPower}
-              demoSummary={demoSummary}
-            />
             <MonitoringPanel
               status={monitoring.status}
               error={monitoring.error}
@@ -128,10 +142,6 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
               onStop={monitoring.stopMonitoring}
               canManage={role === "OPERATOR"}
             />
-            <EnergyChart
-              history={energyHistory}
-              demoMode={Boolean(demoSummary?.scenario_id)}
-            />
           </div>
         )}
 
@@ -140,16 +150,22 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
           <div className="zones-workspace">
             <div>
               {zonesLoading ? (
-                <div className="card" style={{ color: "var(--text-muted)" }}>Loading zones…</div>
+                <><header className="section-header"><div><p className="eyebrow">BUILDING OPERATIONS</p><h1>Zones</h1><p>Current occupancy, comfort, HVAC and optimization state.</p></div></header><div className="zone-grid" aria-label="Loading zones">{[1,2,3,4,5,6].map(item => <div className="zone-detail-skeleton" key={item}><span /></div>)}</div></>
               ) : zonesError ? (
-                <div className="card demo-error" role="alert">{zonesError}</div>
+                <ErrorState title="Zone data is unavailable" onRetry={refreshZones} details={<code>{zonesError}</code>}>
+                  The configured zones for this building could not be loaded.
+                </ErrorState>
               ) : (
-                <ZoneList
-                  zones={zones}
-                  selectedZoneId={selectedZoneId}
-                  onSelectZone={setSelectedZoneId}
-                  monitoringZones={monitoring.status?.zones ?? []}
-                />
+                <section className="zone-list-section">
+                  <header className="section-header"><div><p className="eyebrow">BUILDING OPERATIONS</p><h1>Zones</h1><p>Current occupancy, comfort, HVAC and optimization state.</p></div><span className="badge neutral">{zones.length} CONFIGURED</span></header>
+                  <ZoneList
+                    zones={zones}
+                    selectedZoneId={selectedZoneId}
+                    onSelectZone={setSelectedZoneId}
+                    monitoringZones={monitoring.status?.zones ?? []}
+                    optimizationIntervals={activeIntervals}
+                  />
+                </section>
               )}
             </div>
             <div>
@@ -170,14 +186,14 @@ export function Dashboard({ role }: { role: "ADMIN" | "OPERATOR" }) {
             <section className="occupancy-overview card">
               <div className="section-header"><div><p className="eyebrow">PEOPLE & SPACE</p><h1>Occupancy</h1><p>Current zone snapshot · source depends on configured provider.</p></div><span className="badge warning">SIMULATED / PROVIDER REPORTED</span></div>
               <div className="occupancy-overview-grid">
-                <div className="occupancy-total"><strong>{monitoring.totalOccupancy}</strong><span>people in monitored zones</span><small>{monitoring.occupiedZones} occupied · {monitoring.status?.zones_enabled ?? 0} monitored</small></div>
+                <div className="occupancy-total"><strong>{currentOccupancy ?? "—"}</strong><span>{currentOccupancy === null ? "No current occupancy snapshot" : "people in monitored zones"}</span><small>{occupancySnapshots.filter(item => item.last_people_count > 0).length} occupied · {monitoring.status?.zones_enabled ?? 0} monitored</small></div>
                 <div className="occupancy-zone-breakdown">{(monitoring.status?.zones ?? []).map(item => {
                   const zone = zones.find(candidate => candidate.zone_id === item.zone_id);
-                  const count = item.last_people_count;
+                  const count = item.last_snapshot ? item.last_people_count : null;
                   const capacity = zone?.capacity ?? 0;
-                  const percent = capacity > 0 ? Math.min(100, count / capacity * 100) : 0;
-                  return <div key={item.zone_id} className="occupancy-bar-row"><span>{zone?.name ?? item.zone_id}</span><div className="bar-track"><i style={{ width: `${percent}%` }} /></div><b>{count}<small> / {capacity || "—"}</small></b></div>;
-                })}{!monitoring.status?.zones.length && <p className="muted">Start monitoring to display zone occupancy snapshots.</p>}</div>
+                  const percent = capacity > 0 && count !== null ? Math.min(100, count / capacity * 100) : 0;
+                  return <div key={item.zone_id} className="occupancy-bar-row"><span>{zone?.name ?? item.zone_id}</span><div className="bar-track"><i style={{ width: `${percent}%` }} /></div><b>{count ?? "—"}<small> / {capacity || "—"}</small></b></div>;
+                })}{!occupancySnapshots.length && <p className="muted">Start monitoring to display current occupancy snapshots.</p>}</div>
               </div>
               <p className="muted">Manual YOLO upload below is an independent test and does not feed autonomous demo monitoring.</p>
             </section>
