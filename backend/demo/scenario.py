@@ -112,10 +112,11 @@ class DemoScenarioEngine:
             for zone_id in self.ZONES:
                 occupancy = self.occupancy_provider.get_occupancy(zone_id)
                 try:
-                    # Playback speed only shortens wall-clock time; it must not
-                    # multiply the amount of simulated time or energy consumed.
+                    # One phase's simulated HVAC duration tracks its wall-clock
+                    # playback duration. Faster playback therefore does not
+                    # pretend that more elapsed time occurred in the building.
                     elapsed_hours = (self.phase_duration_seconds / 3600.0
-                                     if self.phase_number > 1 else 0.0)
+                                     / self.speed_multiplier if self.phase_number > 1 else 0.0)
                     await self._on_phase(zone_id, occupancy, self.scenario_id, elapsed_hours)
                 except Exception as exc:
                     self.last_error = f"Scenario input processing failed ({type(exc).__name__})."

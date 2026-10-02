@@ -67,6 +67,18 @@ or energy savings calculation is introduced. UI labels continue to say
 `SIMULATED` / `NOT METER DATA`, and savings remain “Not yet measurable” without
 a validated comparison baseline.
 
+Each phase's HVAC/energy step is now applied when its observation is emitted,
+before the next occupancy transition can close an interval. Phase playback
+speed changes the modeled elapsed duration per phase (`phase duration / speed`);
+it does not stamp an observation into the future. Observation timestamps come
+from the existing UTC clock when occupancy, HVAC, tariff, or control
+observations are actually produced. Natural demo completion emits a final
+simulated HVAC/energy sample before closing any remaining active interval.
+Stop, reset, restart, and normal completion close active intervals against a
+persisted current `ZoneState` before the simulated cumulative-energy counter
+can be reset. If that final sample fails existing quality, timestamp,
+provenance, or monotonicity checks, attribution remains unavailable/invalid.
+
 ## Lifecycle and recovery
 
 An unchanged occupancy observation holds the active interval and does not

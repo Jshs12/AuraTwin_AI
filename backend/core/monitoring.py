@@ -322,13 +322,18 @@ class ZoneMonitoringScheduler:
                 EventTrace.log_event("OCCUPANCY_CHANGED", zone_id, "demo_scenario_occupancy_provider",
                                      {"previous_count": previous, "current_count": occupancy.people_count,
                                       "delta": occupancy.people_count - previous})
+            advance = getattr(self.state_service.control_provider, "advance_simulation", None)
+            if advance:
+                # Advance the HVAC/energy model for the elapsed prior phase
+                # before evaluating this phase's occupancy transition. The
+                # provider timestamps the observation when it is generated.
+                advance(zone_id, previous, elapsed_hours)
+            update_occupancy = getattr(self.state_service.control_provider, "update_occupancy", None)
+            if update_occupancy:
+                update_occupancy(zone_id, occupancy.people_count)
             state = self.state_service.get_zone_state(zone_id, occupancy_override=occupancy)
             may_evaluate, _ = self.optimization_intervals.observe(state)
             if not may_evaluate:
-                advance = getattr(self.state_service.control_provider, "advance_simulation", None)
-                if advance:
-                    advance(zone_id, occupancy.people_count, elapsed_hours)
-                state = self.state_service.get_zone_state(zone_id, occupancy_override=occupancy)
                 self.demo_current_states[zone_id] = state
                 self.energy_telemetry.record(self.demo_current_states, elapsed_hours,
                     tariff={"rate_per_kwh": state.tariff.rate_per_kwh})
@@ -371,10 +376,6 @@ class ZoneMonitoringScheduler:
                         result.applied_setpoint, applied_at=result.timestamp)
                 EventTrace.log_event("DEMO_CONTROL_ACTIVITY", zone_id, "demo_scenario", activity,
                                      status="SUCCESS" if result.success else "FAILED")
-            advance = getattr(self.state_service.control_provider, "advance_simulation", None)
-            if advance:
-                advance(zone_id, occupancy.people_count, elapsed_hours)
-            state = self.state_service.get_zone_state(zone_id, occupancy_override=occupancy)
             self.demo_current_states[zone_id] = state
             self.energy_telemetry.record(
                 self.demo_current_states, elapsed_hours,

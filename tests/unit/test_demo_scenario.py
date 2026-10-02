@@ -95,7 +95,9 @@ def test_scenario_visits_all_four_phases_with_authoritative_occupancy_values():
         assert [phase[0] for phase in engine.PHASES] == [
             "LOW OCCUPANCY", "OCCUPANCY RISE", "HIGH OCCUPANCY", "OCCUPANCY FALL",
         ]
-        assert elapsed_values == [0.0] + [engine.phase_duration_seconds / 3600.0] * 3
+        assert elapsed_values == [0.0] + [
+            engine.phase_duration_seconds / engine.speed_multiplier / 3600.0
+        ] * 3
         await engine.reset()
     asyncio.run(run())
 

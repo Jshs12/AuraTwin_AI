@@ -449,6 +449,25 @@ async def _restore_demo_runtime(*, actor_id: str | None = None):
     app.state.demo_started_by = None
 
 
+def _close_demo_optimization_intervals(reason: str, *, final_phase_hours: float = 0.0) -> None:
+    """Persist a final demo state before an interval or energy counter is reset."""
+    scheduler = app.state.monitoring_scheduler
+    interval_service = scheduler.optimization_intervals
+    scenario = app.state.demo_scenario
+    for zone_id in scenario.ZONES:
+        if interval_service.active(zone_id) is None:
+            continue
+        # Use the explicit final simulated occupancy context; do not call the
+        # configured camera/YOLO provider while finalizing a demo interval.
+        occupancy = scenario.occupancy_provider.get_occupancy(zone_id)
+        advance = getattr(zone_state_service.control_provider, "advance_simulation", None)
+        if final_phase_hours > 0 and advance:
+            advance(zone_id, occupancy.people_count, final_phase_hours)
+        final_state = zone_state_service.get_zone_state(
+            zone_id, occupancy_override=occupancy, persist=True)
+        interval_service.close_active(zone_id, final_state, reason)
+
+
 def _prepare_demo_runtime(user):
     """Install an isolated deterministic workflow for this simulated run."""
     scheduler = app.state.monitoring_scheduler
@@ -531,6 +550,7 @@ async def start_demo(user=Depends(require_permission(Permission.MONITORING_MANAG
             raise HTTPException(status_code=409, detail=detail)
         if app.state.demo_scenario.status.value not in {"RUNNING", "PAUSED"}:
             await app.state.demo_scenario.reset()
+            _close_demo_optimization_intervals("DEMO_RESTARTED")
             if hasattr(control_prov, "reset_simulation"):
                 control_prov.reset_simulation()
             control_service.last_results.clear()
@@ -550,6 +570,11 @@ async def start_demo(user=Depends(require_permission(Permission.MONITORING_MANAG
 
         async def on_demo_complete():
             await scheduler.stop_and_wait()
+            final_phase_hours = (
+                app.state.demo_scenario.phase_duration_seconds
+                / app.state.demo_scenario.speed_multiplier / 3600.0)
+            _close_demo_optimization_intervals(
+                "DEMO_COMPLETED", final_phase_hours=final_phase_hours)
             await _restore_demo_runtime(actor_id=app.state.demo_started_by)
             scheduler.configure_zones(zone.zone_id for zone in configuration_repository.zones_for_user(user))
 
@@ -607,6 +632,7 @@ async def stop_demo(request: Request, user=Depends(require_permission(Permission
         result = await app.state.demo_scenario.stop()
         scheduler = app.state.monitoring_scheduler
         await scheduler.stop_and_wait()
+        _close_demo_optimization_intervals("DEMO_STOPPED")
         await _restore_demo_runtime(actor_id=user.user_id)
         scheduler.configure_zones(
             zone.zone_id for zone in configuration_repository.zones_for_user(user))
@@ -624,6 +650,7 @@ async def reset_demo(request: Request, user=Depends(require_permission(Permissio
     if app.state.demo_scenario.status.value in {"RUNNING", "PAUSED"}:
         await app.state.demo_scenario.stop()
     await scheduler.stop_and_wait()
+    _close_demo_optimization_intervals("DEMO_RESET")
     await _restore_demo_runtime(actor_id=user.user_id)
     scheduler.configure_zones(zone.zone_id for zone in configuration_repository.zones_for_user(user))
     result = await app.state.demo_scenario.reset()

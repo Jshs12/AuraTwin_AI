@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from datetime import timedelta
 
 from backend.core.events import EventTrace
 from backend.core.interfaces import OccupancyProvider
@@ -11,6 +12,7 @@ from backend.database.configuration import SQLAlchemyConfigurationRepository
 from backend.database.engine import create_database_engine, create_session_factory
 from backend.database.runtime import bootstrap_legacy_demo_configuration, upgrade_schema
 from backend.demo.safety_profile import build_demo_safety_profile
+from backend.demo.scenario import DemoScenarioEngine
 from backend.integrations.bacnet.simulated import SimulatedBACnetBuildingControlProvider
 from backend.intelligence.providers import MockIntelligenceProvider
 from backend.intelligence.service import RecommendationWorkflow
@@ -18,6 +20,7 @@ from backend.optimization.interval_repository import SQLAlchemyOptimizationInter
 from backend.schemas.events import OccupancyEvent
 from backend.services.control import ControlService
 from backend.services.control_state import ZoneControlStateService
+from backend.services.data_quality import DataQualityGate
 from backend.services.optimization_intervals import OptimizationIntervalService
 from backend.services.zone_state import ZoneStateService
 from backend.telemetry.repository import SQLAlchemyTelemetryRepository
@@ -97,6 +100,29 @@ def test_demo_safety_profile_is_derived_and_refuses_non_simulated_control():
         build_demo_safety_profile([zone_state._zones["classroom_01"]], NonSimulatedProvider())
 
 
+def test_demo_five_x_speed_uses_phase_wall_duration_without_future_timestamps():
+    scenario = DemoScenarioEngine(phase_duration_seconds=20)
+    scenario.speed_multiplier = 5.0
+    scenario.scenario_id = "deterministic-clock-test"
+    scenario.phase_number = 2
+    scenario.occupancy_provider.capacities = {zone_id: 40 for zone_id in scenario.ZONES}
+    scenario.occupancy_provider.set_counts(scenario.ZONES, scenario.PHASES[1][1])
+    received = []
+
+    async def on_phase(zone_id, occupancy, scenario_id, elapsed_hours):
+        received.append((zone_id, occupancy, scenario_id, elapsed_hours))
+
+    scenario._on_phase = on_phase
+    import asyncio
+    asyncio.run(scenario._emit_phase())
+
+    assert len(received) == len(scenario.ZONES)
+    assert all(item[2] == scenario.scenario_id for item in received)
+    assert all(item[3] == pytest.approx(20 / 5 / 3600) for item in received)
+    assert all(item[1].simulated is True for item in received)
+    assert all(item[1].observed_at <= utc_now() for item in received)
+
+
 def test_persistent_demo_loop_recommends_controls_holds_and_attributes_cost(persistent_demo_pipeline):
     (config, telemetry, interval_repository, control_provider, occupancy,
      state_service, scheduler) = persistent_demo_pipeline
@@ -136,6 +162,8 @@ def test_persistent_demo_loop_recommends_controls_holds_and_attributes_cost(pers
         assert completed.energy_status == "AVAILABLE", (completed.energy_reason_code,
             completed.starting_energy_kwh, completed.ending_energy_kwh,
             completed.starting_energy_observed_at, completed.ending_energy_observed_at)
+        assert completed.starting_energy_observed_at >= completed.started_at
+        assert completed.ending_energy_observed_at > completed.starting_energy_observed_at
         assert completed.energy_consumed_kwh is not None and completed.energy_consumed_kwh > 0
         assert completed.cost_status == "AVAILABLE"
         assert completed.cost_consumed == pytest.approx(completed.energy_consumed_kwh * 0.15)
@@ -168,6 +196,117 @@ def test_persistent_demo_loop_recommends_controls_holds_and_attributes_cost(pers
     assert "ENERGY_IMPACT_CALCULATED" in events
     assert "COST_IMPACT_CALCULATED" in events
     assert "SAVINGS_BASELINE_UNAVAILABLE" in events
+
+
+def test_demo_completion_closes_final_interval_before_cumulative_counter_reset(persistent_demo_pipeline):
+    (_, _, _, control_provider, occupancy, state_service, scheduler) = persistent_demo_pipeline
+    EventTrace.clear()
+
+    import asyncio
+    async def run():
+        await scheduler.process_simulated_occupancy(
+            "classroom_01", occupancy.get_occupancy("classroom_01"), "phase-12-5-finish", 0)
+        active = scheduler.optimization_intervals.active("classroom_01")
+        assert active is not None
+
+        # A deterministic simulated interval advances the existing HVAC model
+        # and persists its real emitted cumulative-energy/tariff observation.
+        await scheduler.process_simulated_occupancy(
+            "classroom_01", occupancy.get_occupancy("classroom_01"), "phase-12-5-finish", 0.25)
+        final_state = state_service.get_zone_state(
+            "classroom_01", occupancy_override=occupancy.get_occupancy("classroom_01"))
+        completed = scheduler.optimization_intervals.close_active(
+            "classroom_01", final_state, "DEMO_COMPLETED")
+
+        assert completed is not None
+        assert completed.status == "COMPLETED"
+        assert completed.starting_energy_observed_at >= completed.started_at
+        assert completed.ending_energy_observed_at > completed.starting_energy_observed_at
+        assert completed.ending_energy_kwh >= completed.starting_energy_kwh
+        assert completed.energy_status == "AVAILABLE"
+        assert completed.cost_status == "AVAILABLE"
+        assert completed.simulated is True
+        assert completed.reason == "DEMO_COMPLETED"
+        assert scheduler.optimization_intervals.active("classroom_01") is None
+
+        # Reset happens only after the persistent interval has its final
+        # cumulative boundary, so the next run's zeroed counter cannot rewrite it.
+        control_provider.reset_simulation()
+        assert scheduler.optimization_intervals.history("classroom_01")[0].interval_id == completed.interval_id
+
+    asyncio.run(run())
+
+
+def test_invalid_energy_boundary_still_fails_attribution(persistent_demo_pipeline):
+    (_, telemetry, _, _, occupancy, state_service, scheduler) = persistent_demo_pipeline
+    import asyncio
+
+    async def run():
+        await scheduler.process_simulated_occupancy(
+            "classroom_01", occupancy.get_occupancy("classroom_01"), "phase-12-5-invalid", 0)
+        active = scheduler.optimization_intervals.active("classroom_01")
+        assert active is not None
+
+        changed = occupancy.get_occupancy("classroom_01").model_copy(update={
+            "people_count": occupancy.count - 1,
+            "occupancy_percentage": (occupancy.count - 1) / 40 * 100,
+            "occupancy_state": "MEDIUM",
+            "observed_at": utc_now(), "timestamp": utc_now(),
+        })
+        ending = state_service.get_zone_state("classroom_01", occupancy_override=changed)
+        ending.energy = ending.energy.model_copy(update={
+            "energy_kwh": max(0.0, active.starting_energy_kwh - 1),
+            "observed_at": utc_now(), "source": active.energy_source,
+            "is_simulated": True,
+        })
+        ending.data_quality = state_service.data_quality_gate.assess_zone_state(ending)
+        telemetry.persist_zone_state(ending)
+        _, completed = scheduler.optimization_intervals.observe(ending)
+        assert completed.energy_status == "INVALID"
+        assert completed.energy_reason_code == "CUMULATIVE_ENERGY_DECREASED"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["stale", "provenance"])
+def test_stale_or_incompatible_energy_still_fails_attribution(persistent_demo_pipeline, failure):
+    (_, telemetry, _, control_provider, occupancy, state_service, scheduler) = persistent_demo_pipeline
+    import asyncio
+
+    async def run():
+        await scheduler.process_simulated_occupancy(
+            "classroom_01", occupancy.get_occupancy("classroom_01"), f"phase-12-5-{failure}", 0)
+        active = scheduler.optimization_intervals.active("classroom_01")
+        assert active is not None and active.starting_energy_kwh is not None
+
+        # Emit a later cumulative sample through the simulated HVAC model.
+        control_provider.advance_simulation("classroom_01", occupancy.count, 0.25)
+        occupancy.count -= 1
+        changed = occupancy.get_occupancy("classroom_01")
+        ending = state_service.get_zone_state("classroom_01", occupancy_override=changed)
+        if failure == "stale":
+            gate = DataQualityGate(max_age_seconds={"energy": 1})
+            state_service.data_quality_gate = gate
+            ending.energy = ending.energy.model_copy(update={
+                "observed_at": utc_now() - timedelta(minutes=2),
+            })
+        else:
+            ending.energy = ending.energy.model_copy(update={
+                "source": "different_simulated_energy_source",
+            })
+        ending.data_quality = state_service.data_quality_gate.assess_zone_state(ending)
+        telemetry.persist_zone_state(ending)
+        _, completed = scheduler.optimization_intervals.observe(ending)
+
+        assert completed.energy_status in {"UNAVAILABLE", "INVALID"}
+        assert completed.energy_consumed_kwh is None
+        assert completed.cost_status == "UNAVAILABLE"
+        if failure == "stale":
+            assert completed.energy_reason_code == "ENDING_BOUNDARY_UNAVAILABLE"
+        else:
+            assert completed.energy_reason_code == "ENERGY_PROVENANCE_INCOMPATIBLE"
+
+    asyncio.run(run())
 
 
 def test_failed_simulated_provider_does_not_create_an_optimization_interval(persistent_demo_pipeline):

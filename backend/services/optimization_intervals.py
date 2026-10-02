@@ -195,6 +195,37 @@ class OptimizationIntervalService:
             "interval_id": interval.interval_id, "reason_code": "NO_VALIDATED_COMPARISON_BASELINE"})
         return True, interval
 
+    def close_active(self, zone_id: str, state: ZoneState,
+                     reason: str = "DEMO_COMPLETED") -> OptimizationInterval | None:
+        """Close an interval from an actual state sample before simulated reset.
+
+        Attribution still runs through `_close`; this method only provides the
+        lifecycle boundary needed when a demo ends without another occupancy
+        change. The caller must persist the current state before invoking it.
+        """
+        if state.zone.zone_id != zone_id:
+            raise ValueError("Optimization interval state must match its zone.")
+        interval = self.active(zone_id)
+        if interval is None:
+            return None
+        self._close(interval, state, reason)
+        if self.repository is not None:
+            interval = self.repository.update(interval)
+        else:
+            self._active.pop(zone_id, None)
+            history = self._completed.setdefault(zone_id, [])
+            history.append(interval)
+            if len(history) > self._history_limit:
+                del history[:-self._history_limit]
+        EventTrace.log_event("OPTIMIZATION_COMPLETED", zone_id, "optimization_interval", {
+            "interval_id": interval.interval_id, "duration_seconds": interval.duration_seconds,
+            "energy_consumed_kwh": interval.energy_consumed_kwh,
+            "cost_consumed": interval.cost_consumed, "simulated": interval.simulated,
+            "reason": reason})
+        EventTrace.log_event("SAVINGS_BASELINE_UNAVAILABLE", zone_id, "optimization_interval", {
+            "interval_id": interval.interval_id, "reason_code": "NO_VALIDATED_COMPARISON_BASELINE"})
+        return interval
+
     def _close(self, interval: OptimizationInterval, state: ZoneState, reason: str) -> None:
         now = utc_now()
         ending_occupancy = state.occupancy.observed_at
