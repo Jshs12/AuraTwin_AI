@@ -123,6 +123,19 @@ def test_demo_five_x_speed_uses_phase_wall_duration_without_future_timestamps():
     assert all(item[1].observed_at <= utc_now() for item in received)
 
 
+def test_repeated_demo_hvac_phase_produces_identical_cumulative_energy():
+    simulated_hours = 20 / 5 / 3600
+    results = []
+    for _ in range(2):
+        provider = CountingSimulatedProvider()
+        provider.advance_simulation("classroom_01", 17, simulated_hours)
+        state = provider.read_control_state("classroom_01")
+        results.append((state.current_temperature, state.power_kw, state.energy_kwh))
+
+    assert results[0] == results[1]
+    assert results[0][2] > 0
+
+
 def test_persistent_demo_loop_recommends_controls_holds_and_attributes_cost(persistent_demo_pipeline):
     (config, telemetry, interval_repository, control_provider, occupancy,
      state_service, scheduler) = persistent_demo_pipeline
