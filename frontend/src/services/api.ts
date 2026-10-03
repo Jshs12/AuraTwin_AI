@@ -244,6 +244,30 @@ export const api = {
     if (!res.ok) throw new Error(data.detail || "Unable to validate integration configuration");
     return data;
   },
+  async connectIntegration(integrationId: string) {
+    const res = await authFetch(`${API_BASE}/integrations/${encodeURIComponent(integrationId)}/connect`, { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail?.message || data.detail?.code || "Unable to test adapter connection");
+    return data;
+  },
+  async disconnectIntegration(integrationId: string) {
+    const res = await authFetch(`${API_BASE}/integrations/${encodeURIComponent(integrationId)}/disconnect`, { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail?.message || data.detail?.code || "Unable to disconnect adapter");
+    return data;
+  },
+  async pollIntegration(integrationId: string) {
+    const res = await authFetch(`${API_BASE}/integrations/${encodeURIComponent(integrationId)}/poll`, { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail?.message || data.detail?.code || "Unable to poll read-only adapter");
+    return data;
+  },
+  async discoverDevicePoints(deviceId: string) {
+    const res = await authFetch(`${API_BASE}/devices/${encodeURIComponent(deviceId)}/discover-points`, { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail?.message || data.detail?.code || "Unable to discover read-only points");
+    return data;
+  },
   async discoverIntegration(integrationId: string) {
     const res = await authFetch(`${API_BASE}/integrations/${encodeURIComponent(integrationId)}/discover`, { method: "POST" });
     const data = await res.json();

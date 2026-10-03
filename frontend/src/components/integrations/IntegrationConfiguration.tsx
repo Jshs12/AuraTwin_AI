@@ -129,19 +129,19 @@ export function IntegrationConfiguration({ buildingId, zones }: { buildingId?: s
   return <section style={{ display: "grid", gap: "1rem" }}>
     <div className="card">
       <div className="card-title">INTEGRATIONS · CONFIGURATION ONLY</div>
-      <p>Building-scoped connection metadata. No network connection or hardware discovery is performed.</p>
+      <p>Building-scoped, supervised read-only adapter actions. Physical connectivity is unavailable until a protocol driver is configured.</p>
       <div className="section-block" aria-label="Integration onboarding lifecycle">
         <div className="card-title">ONBOARDING LIFECYCLE</div>
         <ol style={{ margin: 0, paddingLeft: "1.25rem", display: "grid", gap: ".3rem", color: "var(--text-secondary)" }}>
           <li>Organization → building → floor → zone: organization provisioned; structure configured above.</li>
           <li>Integration: {integrations.length ? `${integrations.length} configured` : "not configured"} · CONFIGURATION ONLY · NOT CONNECTED.</li>
-          <li>Connection test: configuration validation only. Simulated fixture discovery is available; physical discovery is NOT IMPLEMENTED.</li>
+          <li>Configuration validation is local only. Adapter connection attempts are explicit and bounded; BACnet/IP, RTSP, and meter drivers are currently NOT CONFIGURED.</li>
           <li>Devices: {devices.length} shown for selected integration · manually configured or SIMULATED FIXTURE.</li>
           <li>Points: {points.length} shown for selected device · {points.filter(point => point.mapping_status === "CONFIRMED").length} confirmed.</li>
           <li>Runtime: simulated explicit observations only; state applies after quality/freshness validation.</li>
         </ol>
         <div className="historical-metrics" style={{ marginTop: ".75rem" }}>
-          <div><small>HARDWARE CONNECTION</small><strong>NOT IMPLEMENTED</strong></div>
+          <div><small>PHYSICAL ADAPTERS</small><strong>NOT CONFIGURED · READ ONLY · NO WRITES</strong></div>
           <div><small>DEVICE DISCOVERY</small><strong>SIMULATED FIXTURES · NO NETWORK I/O</strong></div>
           <div><small>RUNTIME OBSERVATIONS</small><strong>SIMULATED ONLY</strong></div>
           <div><small>CONTROL SAFETY</small><strong>{controlPolicy?.ready ? "POLICY CONFIGURED · BACKEND GATES ACTIVE" : controlPolicy ? `UNAVAILABLE · ${[...controlPolicy.missing_configuration, ...controlPolicy.invalid_configuration].join(", ")}` : "STATUS UNAVAILABLE · BACKEND GATES ACTIVE"}</strong></div>
@@ -150,14 +150,23 @@ export function IntegrationConfiguration({ buildingId, zones }: { buildingId?: s
       <button onClick={createIntegration}>Add integration</button>
       {integrations.map(item => <div key={item.integration_id} style={{ padding: ".65rem 0", borderBottom: "1px solid var(--border-color)" }}>
         <button onClick={() => { setSelectedIntegration(item.integration_id); setSelectedDevice(""); }}>{item.name}</button>
-        <span style={{ marginLeft: ".75rem" }}>{item.integration_type} · {item.status} · {item.connection_state ?? "DISCONNECTED"} · {item.commissioning_state ?? "CONFIGURED"} · CONFIGURATION ONLY</span>
+        <span style={{ marginLeft: ".75rem" }}>{item.integration_type} · {item.status} · {item.connection_state ?? "DISCONNECTED"} · {item.commissioning_state ?? "CONFIGURED"} · READ-ONLY</span>
         <button style={{ marginLeft: ".5rem" }} onClick={() => editIntegration(item)}>Edit</button>
         <button style={{ marginLeft: ".5rem" }} onClick={() => void run(() => api.testIntegration(item.integration_id).then(report => {
           setTestReport(`${report.result} · simulated=${report.simulated} · connection established=${report.connection_established}`);
         }))}>Validate configuration</button>
+        {(item.connection_state ?? "DISCONNECTED") !== "CONNECTED" && item.status === "CONFIGURED" && <button style={{ marginLeft: ".5rem" }} onClick={() => void run(() => api.connectIntegration(item.integration_id).then(report => {
+          setTestReport(`Adapter ${report.connection_state} · ${report.error_code ?? (report.connection_established ? "connection test succeeded" : "Physical adapter not configured")} · READ-ONLY · writes=${report.capabilities?.can_write ?? false}`);
+        }))}>Test adapter connection</button>}
+        {item.connection_state === "CONNECTED" && <>
+          <button style={{ marginLeft: ".5rem" }} onClick={() => void run(() => api.pollIntegration(item.integration_id).then(report => {
+            setTestReport(`One read-only poll · ${report.observations.length} point result(s) · ${report.simulated ? "SIMULATED" : "REAL PROVIDER"}`);
+          }))}>Poll once</button>
+          <button style={{ marginLeft: ".5rem" }} onClick={() => void run(() => api.disconnectIntegration(item.integration_id))}>Disconnect</button>
+        </>}
         <button style={{ marginLeft: ".5rem" }} onClick={() => void run(() => api.discoverIntegration(item.integration_id).then(report => {
-          setTestReport(`${report.message} · ${report.devices.length} fixture device(s), ${report.points.length} fixture point(s)`);
-        }))}>Load simulated fixtures</button>
+          setTestReport(`${report.message} · ${report.devices.length} ${report.simulated ? "fixture" : "read-only adapter"} device(s), ${report.points.length} point(s)`);
+        }))}>{item.connection_state === "CONNECTED" ? "Discover devices (read-only)" : "Load simulated fixtures"}</button>
         {item.status !== "DISABLED" && <button style={{ marginLeft: ".5rem" }} onClick={() => void run(() => api.disableIntegration(item.integration_id))}>Disable</button>}
       </div>)}
       {testReport && <p role="status">{testReport}</p>}
@@ -184,6 +193,9 @@ export function IntegrationConfiguration({ buildingId, zones }: { buildingId?: s
     {selectedDevice && <div className="card">
       <div className="card-title">POINTS AND LOGICAL MAPPINGS</div>
       <button onClick={createPoint}>Add point / mapping</button>
+      {integrations.find(item => item.integration_id === selectedIntegration)?.connection_state === "CONNECTED" && <button style={{ marginLeft: ".5rem" }} onClick={() => void run(() => api.discoverDevicePoints(selectedDevice).then(report => {
+        setTestReport(`Read-only point discovery · ${report.points.length} point(s) · ${report.simulated ? "SIMULATED" : "REAL PROVIDER"} · suggestions require operator confirmation`);
+      }))}>Discover points (read-only)</button>}
       {points.map(point => <div key={point.point_mapping_id} style={{ display: "grid", gap: ".4rem", padding: ".6rem 0", borderBottom: "1px solid var(--border-color)" }}>
         <span>{point.external_point_id} → {point.logical_signal} · zone {zones.find(zone => zone.zone_id === point.zone_id)?.name ?? "unassigned"} · {point.mapping_status} · {runtimeSignals.has(point.logical_signal) ? "RUNTIME-CAPABLE AFTER VALIDATION" : "HISTORICAL-ONLY"} · unit {point.unit ?? "unspecified"} · {point.readable ? "readable" : "not readable"} · {point.writable ? "writable" : "read-only"} · source {point.mapping_source ?? "unknown"}{point.mapping_confidence === null ? "" : ` · confidence ${point.mapping_confidence}`}</span>
         <small>{point.latestObservation ? `Latest: ${String(point.latestObservation.value)} ${String(point.latestObservation.unit)} · ${String(point.latestObservation.quality_state)} · ${point.latestObservation.simulated ? "SIMULATED" : "provider reported"} · ${String(point.latestObservation.source)}` : "No persisted observation"}</small>

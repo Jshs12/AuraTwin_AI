@@ -85,6 +85,7 @@ from backend.api.integrations import router as integrations_router
 from backend.api.knowledge import router as knowledge_router
 from backend.integrations.connection_test import ConfigurationOnlyTester
 from backend.integrations.discovery import SimulatedFixtureDiscoveryProvider
+from backend.integrations.supervised import AdapterRegistry
 
 # Configuration/auth and scalar telemetry observations are persistent. Live
 # ZoneState snapshots, event traces, and demo stream history remain runtime-only.
@@ -103,6 +104,19 @@ optimization_interval_service = OptimizationIntervalService(
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    # Adapter instances are process-local. Never trust a persisted active state
+    # after restart; require a new explicit operator connection attempt.
+    from sqlalchemy import select
+    from backend.database.models import IntegrationRecord
+    from backend.integrations.lifecycle import ConnectionState, IntegrationLifecycleManager
+    with database_sessions.begin() as session:
+        active_rows = session.scalars(select(IntegrationRecord).where(
+            IntegrationRecord.connection_state.in_([
+                ConnectionState.CONNECTING.value, ConnectionState.CONNECTED.value,
+                ConnectionState.DEGRADED.value]))).all()
+        for row in active_rows:
+            IntegrationLifecycleManager.transition(session, row, ConnectionState.DISCONNECTED,
+                source="application_startup", simulated=True)
     try:
         yield
     finally:
@@ -125,6 +139,37 @@ async def lifespan(application: FastAPI):
             await _restore_demo_runtime()
         if pending_tasks:
             await asyncio.gather(*pending_tasks, return_exceptions=True)
+        registry = getattr(application.state, "integration_adapter_registry", None)
+        if registry is not None:
+            from uuid import UUID
+            from backend.database.models import IntegrationRecord
+            from backend.integrations.lifecycle import ConnectionState, IntegrationLifecycleManager
+            from backend.integrations.supervised import run_bounded
+            for integration_id, adapter in registry.active_items():
+                close_failed = False
+                try:
+                    adapter_simulated = bool(run_bounded(
+                        adapter.health, application.state.integration_adapter_timeout_seconds).simulated)
+                except Exception:
+                    adapter_simulated = True
+                try:
+                    run_bounded(adapter.close, application.state.integration_adapter_timeout_seconds)
+                except Exception:
+                    close_failed = True
+                try:
+                    with database_sessions.begin() as session:
+                        row = session.get(IntegrationRecord, UUID(integration_id))
+                        if row is not None and row.connection_state in {
+                                ConnectionState.CONNECTED.value, ConnectionState.DEGRADED.value,
+                                ConnectionState.CONNECTING.value}:
+                            IntegrationLifecycleManager.transition(session, row,
+                                ConnectionState.ERROR if close_failed else ConnectionState.DISCONNECTED,
+                                source="application_shutdown", simulated=adapter_simulated,
+                                error_code="CONNECTION_FAILED" if close_failed else None)
+                except Exception:
+                    # Shutdown must continue even if local lifecycle persistence fails.
+                    pass
+                registry.remove_active(integration_id)
         database_engine.dispose()
 
 
@@ -136,6 +181,14 @@ app.state.configuration_repository = configuration_repository
 app.state.database_sessions = database_sessions
 app.state.integration_connection_tester = ConfigurationOnlyTester()
 app.state.discovery_provider = SimulatedFixtureDiscoveryProvider()
+app.state.integration_adapter_registry = AdapterRegistry()
+try:
+    app.state.integration_adapter_timeout_seconds = float(
+        os.environ.get("INTEGRATION_ADAPTER_TIMEOUT_SECONDS", "5"))
+    if not (0 < app.state.integration_adapter_timeout_seconds < float("inf")):
+        raise ValueError
+except ValueError:
+    app.state.integration_adapter_timeout_seconds = 5.0
 app.state.organization_repository = organization_repository
 app.state.building_access = BuildingAccessRepository(configuration_repository)
 

@@ -1,5 +1,6 @@
-"""Building-scoped integration commissioning APIs; no hardware I/O is performed."""
+"""Building-scoped supervised integration APIs with a read-only adapter boundary."""
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -10,7 +11,11 @@ from backend.database.models import (BuildingRecord, DeviceRecord, IntegrationRe
     IntegrationLifecycleEventRecord, PointMappingRecord)
 from backend.schemas.integration_config import (DeviceCreate, DeviceUpdate,
     IntegrationCreate, IntegrationUpdate, PointCreate, PointUpdate)
-from backend.schemas.provider_observation import SimulatedObservationRequest
+from backend.schemas.provider_observation import ProviderObservation, SimulatedObservationRequest
+from backend.integrations.lifecycle import ConnectionState, IntegrationLifecycleManager
+from backend.integrations.supervised import (AdapterTimeout, ReadOnlyAdapterUnavailable,
+    run_bounded)
+from backend.integrations.discovery import DiscoveryResult
 from backend.integrations.simulated_observations import ExplicitValueSimulatedProvider
 from backend.integrations.mapping_suggestions import suggest_mapping
 from backend.integrations.commissioning import evaluate_commissioning
@@ -121,10 +126,10 @@ def _point_dict(row, device, integration):
         "mapping_source": row.mapping_source, "created_at": row.created_at, "updated_at": row.updated_at}
 
 
-def _audit(request, user, action, resource, resource_id, building_id, metadata=None):
+def _audit(request, user, action, resource, resource_id, building_id, metadata=None, success=True):
     request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
         action=action, resource=resource, resource_id=resource_id, building_id=building_id,
-        success=True, metadata=metadata)
+        success=success, metadata=metadata)
 
 
 @router.get("/buildings/{building_id}/integrations")
@@ -176,6 +181,14 @@ def update_integration(integration_id: str, body: IntegrationUpdate, request: Re
     with _session(request).begin() as session:
         row = _integration(session, request, user, integration_id, write=True)
         configuration_changed = "configuration" in patch and patch["configuration"] != row.configuration
+        if configuration_changed and row.connection_state in {
+                ConnectionState.CONNECTING.value, ConnectionState.CONNECTED.value,
+                ConnectionState.DEGRADED.value}:
+            raise HTTPException(409, detail={"code": "CONNECTION_ATTEMPT_IN_PROGRESS"})
+        if patch.get("status") == "DISABLED" and row.connection_state in {
+                ConnectionState.CONNECTING.value, ConnectionState.CONNECTED.value,
+                ConnectionState.DEGRADED.value}:
+            raise HTTPException(409, detail={"code": "DISCONNECT_BEFORE_DISABLE"})
         previous_connection = row.connection_state
         previous_commissioning = row.commissioning_state
         for key, value in patch.items():
@@ -204,6 +217,9 @@ def disable_integration(integration_id: str, request: Request,
                         user=Depends(require_permission(Permission.INTEGRATIONS_CONFIGURE))):
     with _session(request).begin() as session:
         row = _integration(session, request, user, integration_id, write=True)
+        if row.connection_state in {ConnectionState.CONNECTING.value,
+                ConnectionState.CONNECTED.value, ConnectionState.DEGRADED.value}:
+            raise HTTPException(409, detail={"code": "CONNECTION_ATTEMPT_IN_PROGRESS"})
         row.status = "DISABLED"
         previous_state = row.commissioning_state
         row.connection_state = "DISCONNECTED"
@@ -226,7 +242,6 @@ def test_integration_configuration(integration_id: str, request: Request,
         row = _integration(session, request, user, integration_id, write=True)
         result = request.app.state.integration_connection_tester.test(status=row.status, configuration=row.configuration or {})
         row.configuration_tested_at = datetime.now(timezone.utc)
-        row.last_error = None if result.result == "CONFIGURATION_VALID" else "CONFIGURATION_INCOMPLETE"
         session.add(IntegrationLifecycleEventRecord(integration_id=row.integration_id,
             event_type="CONFIGURATION_VALIDATION", previous_state=row.commissioning_state,
             new_state=row.commissioning_state, source="configuration_only_tester",
@@ -240,12 +255,405 @@ def test_integration_configuration(integration_id: str, request: Request,
     return payload
 
 
+def _adapter_capabilities(adapter):
+    capabilities = getattr(adapter, "capabilities", None)
+    if capabilities is None:
+        return {"can_read": False, "can_write": False, "physical_io": False,
+                "can_discover_devices": False, "can_discover_points": False,
+                "can_observe": False, "can_report_health": False}
+    result = dict(vars(capabilities))
+    # This phase categorically forbids physical actuator writes, even if a future
+    # driver accidentally advertises them.
+    result["can_write"] = False
+    return result
+
+
+def _safe_adapter_health(adapter, timeout_seconds=5.0):
+    if adapter is None:
+        return None
+    try:
+        raw = run_bounded(adapter.health, timeout_seconds)
+    except Exception:
+        raw = None
+    if raw is None:
+        return SimpleNamespace(state="ERROR", simulated=True, last_error="PROVIDER_FAILURE")
+    allowed_states = {item.value for item in ConnectionState} | {"UNAVAILABLE", "UNKNOWN"}
+    state = raw.state if getattr(raw, "state", None) in allowed_states else "UNKNOWN"
+    safe_errors = IntegrationLifecycleManager.SAFE_ERROR_CODES | {"ADAPTER_UNAVAILABLE"}
+    error = getattr(raw, "last_error", None)
+    return SimpleNamespace(state=state,
+        simulated=bool(getattr(raw, "simulated", True)),
+        last_error=error if error in safe_errors else ("PROVIDER_FAILURE" if error else None))
+
+
+def _public_discovery_candidates(candidates, *, simulated):
+    """Expose only documented discovery fields, never arbitrary adapter metadata."""
+    device_fields = ("external_device_id", "name", "device_type", "protocol", "source",
+                     "discovery_timestamp", "quality_status")
+    point_fields = ("external_point_id", "name", "logical_signal", "data_type", "unit",
+                    "readable", "writable", "protocol", "source", "discovery_timestamp",
+                    "quality_status")
+    safe = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        row = {key: candidate[key] for key in device_fields if key in candidate}
+        if not simulated:
+            row["source"] = "read_only_adapter"
+            row["quality_status"] = "UNASSESSED"
+        row["points"] = []
+        for point in candidate.get("points", []):
+            if not isinstance(point, dict):
+                continue
+            safe_point = {key: point[key] for key in point_fields if key in point}
+            if not simulated:
+                safe_point.update({"source": "read_only_adapter", "quality_status": "UNASSESSED",
+                                   "writable": False})
+            row["points"].append(safe_point)
+        safe.append(row)
+    return safe
+
+
+def _valid_device_discovery(candidates):
+    if not isinstance(candidates, (tuple, list)) or len(candidates) > 500:
+        return False
+    for device in candidates:
+        if not isinstance(device, dict):
+            return False
+        if (not isinstance(device.get("external_device_id"), str)
+                or not 1 <= len(device["external_device_id"]) <= 200
+                or not isinstance(device.get("name"), str)
+                or not 1 <= len(device["name"]) <= 200
+                or not isinstance(device.get("device_type"), str)
+                or not 1 <= len(device["device_type"]) <= 80
+                or not isinstance(device.get("points", []), (list, tuple))):
+            return False
+        for point in device.get("points", []):
+            if (not isinstance(point, dict)
+                    or not isinstance(point.get("external_point_id"), str)
+                    or not 1 <= len(point["external_point_id"]) <= 250
+                    or not isinstance(point.get("name"), str)
+                    or not isinstance(point.get("logical_signal"), str)
+                    or not isinstance(point.get("data_type"), str)
+                    or point.get("readable") is not True
+                    or not isinstance(point.get("writable"), bool)):
+                return False
+    return True
+
+
+@router.post("/integrations/{integration_id}/connect")
+def connect_integration(integration_id: str, request: Request,
+                        user=Depends(require_permission(Permission.INTEGRATIONS_CONFIGURE))):
+    """Explicitly supervise one adapter connection attempt; no automatic retry."""
+    registry = request.app.state.integration_adapter_registry
+    with _session(request).begin() as session:
+        row = _integration(session, request, user, integration_id, write=True)
+        if row.status != "CONFIGURED":
+            raise HTTPException(409, detail={"code": "INTEGRATION_DISABLED"})
+        current = ConnectionState(row.connection_state)
+        if current == ConnectionState.CONNECTING:
+            raise HTTPException(409, detail={"code": "CONNECTION_ATTEMPT_IN_PROGRESS"})
+        if current == ConnectionState.CONNECTED:
+            active_adapter = registry.active(integration_id)
+            if active_adapter is None:
+                # A persisted CONNECTED state cannot survive process memory loss.
+                # Reconcile it before attempting a new, explicit connection.
+                IntegrationLifecycleManager.transition(session, row, ConnectionState.DISCONNECTED,
+                    source="application_recovery", simulated=True)
+                current = ConnectionState.DISCONNECTED
+            else:
+                adapter_health = _safe_adapter_health(active_adapter,
+                    float(getattr(request.app.state, "integration_adapter_timeout_seconds", 5.0)))
+                active_simulated = bool(adapter_health.simulated) if adapter_health else True
+                physical = bool(getattr(
+                    getattr(active_adapter, "capabilities", None), "physical_io", False)
+                    and not active_simulated)
+                return {"integration_id": integration_id, "connection_state": current.value,
+                        "connection_established": True, "simulated": active_simulated,
+                        "physical_connection_established": physical,
+                        "capabilities": _adapter_capabilities(active_adapter)}
+        if current == ConnectionState.ERROR and registry.active(integration_id) is not None:
+            raise HTTPException(409, detail={"code": "DISCONNECT_BEFORE_RETRY"})
+        source = "adapter_" + row.integration_type.lower()
+        if current in {ConnectionState.ERROR, ConnectionState.DEGRADED}:
+            IntegrationLifecycleManager.transition(session, row, ConnectionState.DISCONNECTED,
+                source=source, simulated=True)
+        IntegrationLifecycleManager.transition(session, row, ConnectionState.CONNECTING,
+            source=source, simulated=True)
+        configuration = dict(row.configuration or {})
+        integration_type = row.integration_type
+        timeout_seconds = float(getattr(request.app.state, "integration_adapter_timeout_seconds", 5.0))
+    failure_code = None
+    adapter_holder = []
+
+    def initialize_and_test():
+        created = registry.create(integration_id, integration_type, configuration)
+        if created is None:
+            raise ReadOnlyAdapterUnavailable("ADAPTER_UNAVAILABLE")
+        adapter_holder.append(created)
+        return created, created.test_connection()
+
+    try:
+        adapter, result = run_bounded(initialize_and_test, timeout_seconds)
+        succeeded = bool(getattr(result, "succeeded", False))
+        simulated = bool(getattr(result, "simulated", True))
+        physical_io = bool(getattr(result, "physical_io", False))
+        failure_code = getattr(result, "reason_code", None)
+        capabilities = getattr(adapter, "capabilities", None)
+        if succeeded and bool(getattr(capabilities, "can_write", False)):
+            succeeded, failure_code = False, "ADAPTER_UNAVAILABLE"
+        if succeeded and not simulated and not bool(getattr(capabilities, "physical_io", False)):
+            succeeded, failure_code = False, "ADAPTER_UNAVAILABLE"
+        if not succeeded and failure_code not in IntegrationLifecycleManager.SAFE_ERROR_CODES:
+            failure_code = "CONNECTION_FAILED"
+    except AdapterTimeout:
+        adapter = adapter_holder[0] if adapter_holder else None
+        succeeded, simulated, physical_io, failure_code = False, True, False, "CONNECT_TIMEOUT"
+    except ReadOnlyAdapterUnavailable:
+        adapter = adapter_holder[0] if adapter_holder else None
+        succeeded, simulated, physical_io, failure_code = False, True, False, "ADAPTER_UNAVAILABLE"
+    except Exception:
+        adapter = adapter_holder[0] if adapter_holder else None
+        succeeded, simulated, physical_io, failure_code = False, True, False, "CONNECTION_FAILED"
+    if adapter is None:
+        capabilities = None
+    else:
+        capabilities = getattr(adapter, "capabilities", None)
+    with _session(request).begin() as session:
+        row = _integration(session, request, user, integration_id, write=True)
+        if row.connection_state != ConnectionState.CONNECTING.value:
+            try:
+                run_bounded(adapter.close, timeout_seconds)
+            except Exception:
+                pass
+            raise HTTPException(409, detail={"code": "CONNECTION_STATE_CHANGED"})
+        if succeeded:
+            IntegrationLifecycleManager.transition(session, row, ConnectionState.CONNECTED,
+                source=source, simulated=simulated)
+            registry.set_active(integration_id, adapter)
+            state = ConnectionState.CONNECTED
+        else:
+            IntegrationLifecycleManager.transition(session, row, ConnectionState.ERROR,
+                source=source, simulated=simulated, error_code=failure_code or "CONNECTION_FAILED")
+            state = ConnectionState.ERROR
+    _audit(request, user, "integration_connection_attempted", "integration", integration_id,
+           str(row.building_id), metadata={"connection_state": state.value, "simulated": simulated},
+           success=succeeded)
+    return {"integration_id": integration_id, "connection_state": state.value,
+        "connection_established": succeeded, "simulated": simulated,
+        "physical_connection_established": bool(succeeded and physical_io and not simulated
+            and getattr(getattr(adapter, "capabilities", None), "physical_io", False)),
+        "error_code": failure_code, "capabilities": _adapter_capabilities(adapter),
+        "retry": "EXPLICIT_OPERATOR_ACTION_ONLY"}
+
+
+@router.post("/integrations/{integration_id}/disconnect")
+def disconnect_integration(integration_id: str, request: Request,
+                           user=Depends(require_permission(Permission.INTEGRATIONS_CONFIGURE))):
+    registry = request.app.state.integration_adapter_registry
+    with _session(request).begin() as session:
+        row = _integration(session, request, user, integration_id, write=True)
+        state = ConnectionState(row.connection_state)
+        if state == ConnectionState.CONNECTING:
+            raise HTTPException(409, detail={"code": "CONNECTION_ATTEMPT_IN_PROGRESS"})
+        adapter = registry.active(integration_id)
+        source = "adapter_disconnect"
+        timeout_seconds = float(getattr(request.app.state, "integration_adapter_timeout_seconds", 5.0))
+        if state == ConnectionState.DISCONNECTED:
+            return {"integration_id": integration_id, "connection_state": state.value,
+                    "disconnected": True, "simulated": True}
+    failure_code = None
+    adapter_health = _safe_adapter_health(adapter,
+        float(getattr(request.app.state, "integration_adapter_timeout_seconds", 5.0)))
+    simulated = bool(adapter_health.simulated) if adapter_health is not None else True
+    if adapter is not None:
+        try:
+            run_bounded(adapter.close, timeout_seconds)
+        except AdapterTimeout:
+            failure_code = "CONNECT_TIMEOUT"
+        except Exception:
+            failure_code = "CONNECTION_FAILED"
+    with _session(request).begin() as session:
+        row = _integration(session, request, user, integration_id, write=True)
+        if failure_code:
+            if state != ConnectionState.ERROR:
+                IntegrationLifecycleManager.transition(session, row, ConnectionState.ERROR,
+                    source=source, simulated=simulated, error_code=failure_code)
+        else:
+            IntegrationLifecycleManager.transition(session, row, ConnectionState.DISCONNECTED,
+                source=source, simulated=simulated)
+    if failure_code is None:
+        registry.remove_active(integration_id)
+    _audit(request, user, "integration_disconnected", "integration", integration_id, str(row.building_id))
+    if failure_code:
+        return {"integration_id": integration_id, "connection_state": "ERROR",
+                "disconnected": False, "error_code": failure_code, "simulated": simulated}
+    return {"integration_id": integration_id, "connection_state": "DISCONNECTED",
+            "disconnected": True, "simulated": simulated}
+
+
+@router.post("/integrations/{integration_id}/poll")
+def poll_integration(integration_id: str, request: Request,
+                     user=Depends(require_permission(Permission.INTEGRATIONS_CONFIGURE))):
+    """One explicit read-only poll; only adapter-produced normalized observations enter ingestion."""
+    registry = request.app.state.integration_adapter_registry
+    with _session(request)() as session:
+        integration = _integration(session, request, user, integration_id, write=True)
+        adapter = registry.active(integration_id)
+        if (integration.connection_state != ConnectionState.CONNECTED.value or adapter is None
+                or not getattr(getattr(adapter, "capabilities", None), "can_observe", False)):
+            raise HTTPException(409, detail={"code": "READ_ONLY_ADAPTER_UNAVAILABLE",
+                "message": "No connected read-only adapter is available."})
+        points = session.scalars(select(PointMappingRecord).join(DeviceRecord).where(
+            DeviceRecord.integration_id == integration.integration_id,
+            DeviceRecord.status == "CONFIGURED", PointMappingRecord.mapping_status == "CONFIRMED",
+            PointMappingRecord.readable.is_(True))).all()
+        point_data = [(point.point_mapping_id, point.external_point_id, point.device_id,
+                       point.logical_signal, point.unit)
+                      for point in points]
+        timeout_seconds = float(getattr(request.app.state, "integration_adapter_timeout_seconds", 5.0))
+    results = []
+    adapter_failure = None
+    for point_id, external_id, device_id, logical_signal, unit in point_data:
+        try:
+            observation = run_bounded(lambda: adapter.observe(external_id), timeout_seconds)
+            if not isinstance(observation, ProviderObservation):
+                adapter_failure = "OBSERVATION_ERROR"
+                results.append({"point_mapping_id": str(point_id), "accepted": False,
+                                "reason_code": "OBSERVATION_FORMAT_INVALID"})
+                continue
+            if (observation.integration_id != integration_id or observation.device_id != str(device_id)
+                    or observation.point_mapping_id != str(point_id)):
+                adapter_failure = "OBSERVATION_ERROR"
+                results.append({"point_mapping_id": str(point_id), "accepted": False,
+                                "reason_code": "OBSERVATION_IDENTITY_MISMATCH"})
+                continue
+            result = request.app.state.provider_observation_ingestion_service.ingest(observation)
+            results.append({**result.model_dump(mode="json"), "logical_signal": logical_signal,
+                            "unit": unit})
+        except AdapterTimeout:
+            adapter_failure = "CONNECT_TIMEOUT"
+            results.append({"point_mapping_id": str(point_id), "accepted": False,
+                            "reason_code": "OBSERVATION_TIMEOUT"})
+        except Exception:
+            adapter_failure = "OBSERVATION_ERROR"
+            results.append({"point_mapping_id": str(point_id), "accepted": False,
+                            "reason_code": "OBSERVATION_ERROR"})
+    health = _safe_adapter_health(adapter, timeout_seconds)
+    if adapter_failure:
+        with _session(request).begin() as session:
+            current = _integration(session, request, user, integration_id, write=True)
+            if current.connection_state == ConnectionState.CONNECTED.value:
+                IntegrationLifecycleManager.transition(session, current, ConnectionState.DEGRADED,
+                    source="read_only_adapter", simulated=bool(health.simulated),
+                    error_code=adapter_failure)
+            response_state = current.connection_state
+    else:
+        response_state = ConnectionState.CONNECTED.value
+    _audit(request, user, "integration_read_only_poll", "integration", integration_id,
+           str(integration.building_id), metadata={"observation_count": len(results)},
+           success=adapter_failure is None)
+    return {"integration_id": integration_id, "connection_state": response_state,
+        "simulated": bool(health.simulated),
+        "read_only": True, "write_capability": False, "observations": results}
+
+
+@router.post("/devices/{device_id}/discover-points")
+def discover_adapter_points(device_id: str, request: Request,
+                           user=Depends(require_permission(Permission.INTEGRATIONS_CONFIGURE))):
+    """One explicit read-only point discovery call; discovered mappings are never confirmed."""
+    registry = request.app.state.integration_adapter_registry
+    with _session(request)() as session:
+        device, integration = _device(session, request, user, device_id, write=True)
+        adapter = registry.active(str(integration.integration_id))
+        capabilities = getattr(adapter, "capabilities", None)
+        if (integration.connection_state != ConnectionState.CONNECTED.value or adapter is None
+                or not capabilities or not capabilities.can_discover_points or capabilities.can_write):
+            raise HTTPException(409, detail={"code": "POINT_DISCOVERY_UNAVAILABLE",
+                "message": "No connected read-only point discovery adapter is available."})
+        device_identifier = device.external_device_id
+        timeout_seconds = float(getattr(request.app.state, "integration_adapter_timeout_seconds", 5.0))
+        zone_owned = device.zone_id is not None
+    try:
+        candidates = run_bounded(lambda: adapter.discover_points(device_identifier), timeout_seconds)
+    except AdapterTimeout:
+        raise HTTPException(504, detail={"code": "DISCOVERY_TIMEOUT"}) from None
+    except Exception:
+        raise HTTPException(502, detail={"code": "DISCOVERY_FAILED"}) from None
+    if not isinstance(candidates, (tuple, list)) or len(candidates) > 1000:
+        raise HTTPException(502, detail={"code": "DISCOVERY_FORMAT_INVALID"})
+    safe_rows = []
+    adapter_health = _safe_adapter_health(adapter,
+        float(getattr(request.app.state, "integration_adapter_timeout_seconds", 5.0)))
+    source = "simulated_adapter_discovery" if bool(adapter_health.simulated) else "read_only_adapter_discovery"
+    with _session(request).begin() as session:
+        device, integration = _device(session, request, user, device_id, write=True)
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                raise HTTPException(502, detail={"code": "DISCOVERY_FORMAT_INVALID"})
+            external_id = candidate.get("external_point_id")
+            signal = candidate.get("logical_signal")
+            data_type = candidate.get("data_type")
+            readable = candidate.get("readable")
+            writable = candidate.get("writable", False)
+            unit = candidate.get("unit")
+            name = candidate.get("name")
+            if (not isinstance(external_id, str) or not external_id or len(external_id) > 250
+                    or not isinstance(signal, str) or len(signal) > 100
+                    or not isinstance(data_type, str) or len(data_type) > 40
+                    or readable is not True or not isinstance(writable, bool)
+                    or (unit is not None and (not isinstance(unit, str) or len(unit) > 40))
+                    or (name is not None and (not isinstance(name, str) or len(name) > 240))):
+                raise HTTPException(502, detail={"code": "DISCOVERY_FORMAT_INVALID"})
+            existing = session.scalars(select(PointMappingRecord).where(
+                PointMappingRecord.device_id == device.device_id,
+                PointMappingRecord.external_point_id == external_id)).first()
+            if existing is None:
+                mapping_status, confidence, _ = suggest_mapping(signal=signal, unit=unit,
+                    data_type=data_type, readable=readable, zone_owned=zone_owned)
+                existing = PointMappingRecord(device_id=device.device_id, zone_id=device.zone_id,
+                    external_point_id=external_id, logical_signal=signal, data_type=data_type,
+                    unit=unit, readable=readable, writable=False,
+                    metadata_json={"name": name, "source": source, "simulated": source.startswith("simulated")},
+                    mapping_status=mapping_status, mapping_confidence=confidence,
+                    mapping_source=source if mapping_status == "SUGGESTED" else None)
+                session.add(existing)
+                session.flush()
+            safe_rows.append(_point_dict(existing, device, integration))
+    _audit(request, user, "integration_point_discovery_requested", "device", device_id,
+        str(integration.building_id), metadata={"point_count": len(safe_rows),
+        "simulated": source.startswith("simulated")})
+    return {"device_id": device_id, "integration_id": str(integration.integration_id),
+        "read_only": True, "write_capability": False,
+        "simulated": source.startswith("simulated"), "discovery_performed": True,
+        "points": safe_rows}
+
+
 @router.post("/integrations/{integration_id}/discover")
 def discover_devices(integration_id: str, request: Request,
                      user=Depends(require_permission(Permission.INTEGRATIONS_CONFIGURE))):
     with _session(request).begin() as session:
         row = _integration(session, request, user, integration_id, write=True)
-        result = request.app.state.discovery_provider.discover(row.integration_type)
+        adapter = request.app.state.integration_adapter_registry.active(integration_id)
+        adapter_caps = getattr(adapter, "capabilities", None)
+        if row.connection_state == ConnectionState.CONNECTED.value and adapter is not None:
+            if adapter_caps and adapter_caps.can_discover_devices and not adapter_caps.can_write:
+                try:
+                    result = run_bounded(adapter.discover_devices,
+                        float(getattr(request.app.state, "integration_adapter_timeout_seconds", 5.0)))
+                except AdapterTimeout:
+                    raise HTTPException(504, detail={"code": "DISCOVERY_TIMEOUT"}) from None
+                except Exception:
+                    raise HTTPException(502, detail={"code": "DISCOVERY_FAILED"}) from None
+                if not isinstance(result, DiscoveryResult):
+                    raise HTTPException(502, detail={"code": "DISCOVERY_FORMAT_INVALID"})
+            else:
+                result = DiscoveryResult(simulated=True, performed=False, candidates=(),
+                    message="Read-only device discovery is unavailable for this adapter.")
+        else:
+            result = request.app.state.discovery_provider.discover(row.integration_type)
+        if result.performed and not _valid_device_discovery(result.candidates):
+            raise HTTPException(502, detail={"code": "DISCOVERY_FORMAT_INVALID"})
         upserted_devices, upserted_points = [], []
         if result.performed:
             for candidate in result.candidates:
@@ -268,28 +676,33 @@ def discover_devices(integration_id: str, request: Request,
                             signal=candidate_point["logical_signal"], unit=candidate_point.get("unit"),
                             data_type=candidate_point["data_type"], readable=candidate_point["readable"],
                             zone_owned=device.zone_id is not None)
+                        discovered_source = candidate_point.get("source", "SIMULATED_FIXTURE") if result.simulated else "read_only_adapter"
                         point = PointMappingRecord(device_id=device.device_id, zone_id=device.zone_id,
                             external_point_id=candidate_point["external_point_id"],
                             logical_signal=candidate_point["logical_signal"], data_type=candidate_point["data_type"],
                             unit=candidate_point.get("unit"), readable=candidate_point["readable"],
-                            writable=candidate_point["writable"],
-                            metadata_json={"name": candidate_point["name"], "source": "SIMULATED_FIXTURE",
-                                "capabilities": candidate.get("capabilities", []),
-                                "protocol": candidate_point["protocol"],
-                                "discovery_timestamp": candidate_point["discovery_timestamp"],
-                                "quality_status": candidate_point["quality_status"],
-                                "error": candidate_point["error"]},
+                            writable=candidate_point["writable"] if result.simulated else False,
+                            metadata_json={"name": candidate_point["name"], "source": discovered_source,
+                                "capabilities": candidate.get("capabilities", []) if result.simulated else [],
+                                "protocol": candidate_point.get("protocol", candidate.get("protocol")) if result.simulated else row.integration_type,
+                                "discovery_timestamp": candidate_point.get("discovery_timestamp"),
+                                "quality_status": candidate_point.get("quality_status", "UNASSESSED") if result.simulated else "UNASSESSED",
+                                "error": candidate_point.get("error") if result.simulated else None},
                             mapping_status=suggested, mapping_confidence=confidence,
-                            mapping_source="SIMULATED_FIXTURE" if suggested == "SUGGESTED" else None)
+                            mapping_source=discovered_source if suggested == "SUGGESTED" else None)
                         session.add(point)
                         session.flush()
                     upserted_points.append(str(point.point_mapping_id))
-            _lifecycle(session, row, "SIMULATED_DISCOVERY", "DISCOVERY_REVIEW",
-                       source="SIMULATED_FIXTURE", simulated=True)
+            _lifecycle(session, row, "SIMULATED_DISCOVERY" if result.simulated else "ADAPTER_DISCOVERY",
+                       "DISCOVERY_REVIEW", source="SIMULATED_FIXTURE" if result.simulated else "read_only_adapter",
+                       simulated=result.simulated)
         payload = {"integration_id": str(row.integration_id), "simulated": result.simulated,
-            "discovery_performed": result.performed, "candidates": list(result.candidates),
+            "discovery_performed": result.performed,
+            "candidates": _public_discovery_candidates(result.candidates, simulated=result.simulated),
             "devices": upserted_devices, "points": upserted_points,
-            "message": result.message}
+            "message": (result.message if result.simulated else
+                ("Read-only adapter discovery completed." if result.performed else
+                 "Read-only adapter discovery did not return devices."))}
     _audit(request, user, "integration_discovery_requested", "integration", integration_id,
            str(row.building_id), metadata={"simulated": result.simulated, "performed": result.performed})
     return payload
@@ -345,8 +758,10 @@ def evaluate_integration_commissioning(integration_id: str, request: Request,
 @router.get("/integrations/{integration_id}/health")
 def get_integration_health(integration_id: str, request: Request,
                            user=Depends(require_permission(Permission.BUILDING_READ))):
+    adapter = None
     with _session(request)() as session:
         integration = _integration(session, request, user, integration_id)
+        adapter = request.app.state.integration_adapter_registry.active(integration_id)
         devices = session.scalars(select(DeviceRecord).where(
             DeviceRecord.integration_id == integration.integration_id,
             DeviceRecord.archived_at.is_(None))).all()
@@ -383,10 +798,19 @@ def get_integration_health(integration_id: str, request: Request,
                 "quality_reason": assessment.reason_code if assessment else "OBSERVATION_MISSING",
                 "source": observation.source if observation else None,
                 "simulated": bool(observation.simulated) if observation else None})
+        adapter_health = _safe_adapter_health(adapter,
+            float(getattr(request.app.state, "integration_adapter_timeout_seconds", 5.0)))
         return {"integration_id": str(integration.integration_id), "building_id": str(integration.building_id),
             "connection_state": integration.connection_state, "last_seen_at": integration.last_seen_at,
-            "last_error": integration.last_error, "simulated": True,
-            "physical_connection_implemented": False, "signals": signals}
+            "last_error": integration.last_error,
+            "simulated": bool(adapter_health.simulated) if adapter_health else True,
+            "physical_connection_implemented": bool(adapter
+                and integration.connection_state == ConnectionState.CONNECTED.value
+                and adapter_health and not adapter_health.simulated
+                and getattr(getattr(adapter, "capabilities", None), "physical_io", False)),
+            "adapter_health": adapter_health.state if adapter_health else "NOT_CONFIGURED",
+            "capabilities": _adapter_capabilities(adapter),
+            "read_only": True, "write_capability": False, "signals": signals}
 
 
 @router.get("/integrations/{integration_id}/lifecycle")
