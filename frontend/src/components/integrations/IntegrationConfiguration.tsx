@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../services/api";
 
-type Integration = { integration_id: string; name: string; integration_type: string; status: string; simulated: boolean };
+type Integration = { integration_id: string; name: string; integration_type: string; status: string; simulated: boolean; connection_state?: string; commissioning_state?: string };
 type Device = { device_id: string; name: string; external_device_id: string; device_type: string; manufacturer?: string | null; model?: string | null; zone_id?: string | null; status?: string };
 type Point = { point_mapping_id: string; external_point_id: string; logical_signal: string; unit?: string | null; readable?: boolean; writable?: boolean; zone_id: string | null; mapping_status: string; mapping_confidence: number | null; mapping_source: string | null; latestObservation?: Record<string, unknown> | null };
+type Commissioning = { state: string; read_only_ready: boolean; message: string; active_devices: number; confirmed_readable_mappings: number; observation_quality: string[]; simulated: boolean };
+type IntegrationHealth = { connection_state: string; last_seen_at?: string | null; last_error?: string | null; physical_connection_implemented: boolean; signals: Array<{ signal: string; quality_state: string; source?: string | null; simulated?: boolean | null }> };
 
 export function IntegrationConfiguration({ buildingId, zones }: { buildingId?: string; zones: Array<{ zone_id: string; name: string }> }) {
   const [integrations, setIntegrations] = useState<Integration[]>([]);
@@ -15,6 +17,8 @@ export function IntegrationConfiguration({ buildingId, zones }: { buildingId?: s
   const [notice, setNotice] = useState("");
   const [testReport, setTestReport] = useState("");
   const [controlPolicy, setControlPolicy] = useState<{ ready: boolean; missing_configuration: string[]; invalid_configuration: string[] } | null>(null);
+  const [commissioning, setCommissioning] = useState<Commissioning | null>(null);
+  const [health, setHealth] = useState<IntegrationHealth | null>(null);
 
   const loadPoints = async (deviceId: string): Promise<Point[]> => {
     const items = await api.getDevicePoints(deviceId) as Point[];
@@ -34,6 +38,12 @@ export function IntegrationConfiguration({ buildingId, zones }: { buildingId?: s
     if (!selectedIntegration) { setDevices([]); return; }
     api.getIntegrationDevices(selectedIntegration).then(setDevices).catch(e => setError(e.message));
   }, [selectedIntegration]);
+  useEffect(() => {
+    if (!selectedIntegration) { setCommissioning(null); setHealth(null); return; }
+    Promise.all([api.getIntegrationCommissioning(selectedIntegration), api.getIntegrationHealth(selectedIntegration)])
+      .then(([state, status]) => { setCommissioning(state); setHealth(status); })
+      .catch(e => setError(e instanceof Error ? e.message : "Unable to load commissioning status"));
+  }, [selectedIntegration, integrations, devices, points]);
   useEffect(() => {
     if (!selectedDevice) { setPoints([]); return; }
     loadPoints(selectedDevice).then(setPoints).catch(e => setError(e.message));
@@ -125,14 +135,14 @@ export function IntegrationConfiguration({ buildingId, zones }: { buildingId?: s
         <ol style={{ margin: 0, paddingLeft: "1.25rem", display: "grid", gap: ".3rem", color: "var(--text-secondary)" }}>
           <li>Organization → building → floor → zone: organization provisioned; structure configured above.</li>
           <li>Integration: {integrations.length ? `${integrations.length} configured` : "not configured"} · CONFIGURATION ONLY · NOT CONNECTED.</li>
-          <li>Connection test: simulated configuration check only. Discovery: NOT IMPLEMENTED.</li>
-          <li>Devices: {devices.length} shown for selected integration · manually configured.</li>
+          <li>Connection test: configuration validation only. Simulated fixture discovery is available; physical discovery is NOT IMPLEMENTED.</li>
+          <li>Devices: {devices.length} shown for selected integration · manually configured or SIMULATED FIXTURE.</li>
           <li>Points: {points.length} shown for selected device · {points.filter(point => point.mapping_status === "CONFIRMED").length} confirmed.</li>
           <li>Runtime: simulated explicit observations only; state applies after quality/freshness validation.</li>
         </ol>
         <div className="historical-metrics" style={{ marginTop: ".75rem" }}>
           <div><small>HARDWARE CONNECTION</small><strong>NOT IMPLEMENTED</strong></div>
-          <div><small>DEVICE DISCOVERY</small><strong>NOT IMPLEMENTED</strong></div>
+          <div><small>DEVICE DISCOVERY</small><strong>SIMULATED FIXTURES · NO NETWORK I/O</strong></div>
           <div><small>RUNTIME OBSERVATIONS</small><strong>SIMULATED ONLY</strong></div>
           <div><small>CONTROL SAFETY</small><strong>{controlPolicy?.ready ? "POLICY CONFIGURED · BACKEND GATES ACTIVE" : controlPolicy ? `UNAVAILABLE · ${[...controlPolicy.missing_configuration, ...controlPolicy.invalid_configuration].join(", ")}` : "STATUS UNAVAILABLE · BACKEND GATES ACTIVE"}</strong></div>
         </div>
@@ -140,14 +150,27 @@ export function IntegrationConfiguration({ buildingId, zones }: { buildingId?: s
       <button onClick={createIntegration}>Add integration</button>
       {integrations.map(item => <div key={item.integration_id} style={{ padding: ".65rem 0", borderBottom: "1px solid var(--border-color)" }}>
         <button onClick={() => { setSelectedIntegration(item.integration_id); setSelectedDevice(""); }}>{item.name}</button>
-        <span style={{ marginLeft: ".75rem" }}>{item.integration_type} · {item.status} · simulated metadata</span>
+        <span style={{ marginLeft: ".75rem" }}>{item.integration_type} · {item.status} · {item.connection_state ?? "DISCONNECTED"} · {item.commissioning_state ?? "CONFIGURED"} · CONFIGURATION ONLY</span>
         <button style={{ marginLeft: ".5rem" }} onClick={() => editIntegration(item)}>Edit</button>
         <button style={{ marginLeft: ".5rem" }} onClick={() => void run(() => api.testIntegration(item.integration_id).then(report => {
           setTestReport(`${report.result} · simulated=${report.simulated} · connection established=${report.connection_established}`);
         }))}>Validate configuration</button>
+        <button style={{ marginLeft: ".5rem" }} onClick={() => void run(() => api.discoverIntegration(item.integration_id).then(report => {
+          setTestReport(`${report.message} · ${report.devices.length} fixture device(s), ${report.points.length} fixture point(s)`);
+        }))}>Load simulated fixtures</button>
         {item.status !== "DISABLED" && <button style={{ marginLeft: ".5rem" }} onClick={() => void run(() => api.disableIntegration(item.integration_id))}>Disable</button>}
       </div>)}
       {testReport && <p role="status">{testReport}</p>}
+      {selectedIntegration && <div className="section-block" aria-label="Integration commissioning status">
+        <div className="card-title">COMMISSIONING · READ ONLY</div>
+        <button onClick={() => void run(() => api.evaluateIntegrationCommissioning(selectedIntegration)
+          .then(report => setCommissioning(report)))}>Evaluate commissioning</button>
+        <p>{commissioning?.state ?? "Loading"} · {commissioning?.message ?? "Status unavailable"}</p>
+        <p>Connection: {health?.connection_state ?? "unknown"} · {health?.physical_connection_implemented ? "VERIFIED ADAPTER" : "SIMULATED / NO PHYSICAL ADAPTER"}</p>
+        <p>Last observation: {health?.last_seen_at ?? "none"} · last error: {health?.last_error ?? "none"}</p>
+        <p>Devices: {commissioning?.active_devices ?? 0} · confirmed readable mappings: {commissioning?.confirmed_readable_mappings ?? 0}</p>
+        {health?.signals.map(signal => <small key={signal.signal} style={{ display: "block" }}>{signal.signal}: {signal.quality_state} · {signal.source ?? "no source"} · {signal.simulated === null ? "no observation" : signal.simulated ? "SIMULATED" : "provider reported"}</small>)}
+      </div>}
     </div>
     {selectedIntegration && <div className="card">
       <div className="card-title">DEVICES</div>

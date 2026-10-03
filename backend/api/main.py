@@ -84,7 +84,7 @@ from backend.api.configuration import router as configuration_router
 from backend.api.integrations import router as integrations_router
 from backend.api.knowledge import router as knowledge_router
 from backend.integrations.connection_test import ConfigurationOnlyTester
-from backend.integrations.discovery import NoDiscoveryProvider
+from backend.integrations.discovery import SimulatedFixtureDiscoveryProvider
 
 # Configuration/auth and scalar telemetry observations are persistent. Live
 # ZoneState snapshots, event traces, and demo stream history remain runtime-only.
@@ -135,7 +135,7 @@ app.state.audit_service = AuditService()
 app.state.configuration_repository = configuration_repository
 app.state.database_sessions = database_sessions
 app.state.integration_connection_tester = ConfigurationOnlyTester()
-app.state.discovery_provider = NoDiscoveryProvider()
+app.state.discovery_provider = SimulatedFixtureDiscoveryProvider()
 app.state.organization_repository = organization_repository
 app.state.building_access = BuildingAccessRepository(configuration_repository)
 

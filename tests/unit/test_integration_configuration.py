@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from backend.database.repositories import OrganizationData
@@ -33,16 +34,28 @@ def test_integration_device_point_mapping_lifecycle_and_simulated_adapters():
     assert test_result["simulated"] is True
     assert test_result["connection_established"] is False
     assert test_result["result"] == "CONFIGURATION_VALID"
+    assert test_result["commissioning_state"] == "CONFIGURED"
+    assert test_result["connection_state"] == "DISCONNECTED"
+    assert test_result["physical_connection_attempted"] is False
     discovery = client.post(f"/api/integrations/{integration['integration_id']}/discover").json()
-    assert discovery["simulated"] is True and discovery["discovery_performed"] is False
-    assert discovery["candidates"] == []
+    assert discovery["simulated"] is True and discovery["discovery_performed"] is True
+    assert len(discovery["candidates"]) == 1
+    assert "SIMULATED FIXTURES" in discovery["message"]
+    repeated = client.post(f"/api/integrations/{integration['integration_id']}/discover").json()
+    assert repeated["devices"] == discovery["devices"]
+    assert repeated["points"] == discovery["points"]
+    commissioning = client.get(f"/api/integrations/{integration['integration_id']}/commissioning").json()
+    assert commissioning["state"] == "SIMULATED_COMMISSIONING"
+    assert commissioning["read_only_ready"] is False
 
     device = client.post(f"/api/integrations/{integration['integration_id']}/devices", json={
         "external_device_id": f"device-{uuid4().hex[:8]}", "name": "Controller",
         "device_type": "HVAC_CONTROLLER", "manufacturer": "Unknown", "model": None,
     })
     assert device.status_code == 201
+    zone_id = client.get(f"/api/buildings/{building_id}/zones").json()["zones"][0]["zone_id"]
     point = client.post(f"/api/devices/{device.json()['device_id']}/points", json={
+        "zone_id": zone_id,
         "external_point_id": "AI:1:presentValue", "logical_signal": "temperature",
         "data_type": "number", "unit": "C", "readable": True, "writable": False,
         "mapping_status": "SUGGESTED", "mapping_confidence": 0.82,
@@ -50,7 +63,17 @@ def test_integration_device_point_mapping_lifecycle_and_simulated_adapters():
     assert point.status_code == 201
     point_id = point.json()["point_mapping_id"]
     assert point.json()["mapping_status"] == "SUGGESTED"
-    assert client.post(f"/api/point-mappings/{point_id}/confirm").json()["mapping_status"] == "CONFIRMED"
+    confirmed = client.post(f"/api/point-mappings/{point_id}/confirm")
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["mapping_status"] == "CONFIRMED"
+    observed = client.post(f"/api/point-mappings/{point_id}/simulated-observation", json={
+        "value": 21.0, "observed_at": datetime.now(timezone.utc).isoformat()})
+    assert observed.status_code == 200
+    health = client.get(f"/api/integrations/{integration['integration_id']}/health").json()
+    temperature_health = next(signal for signal in health["signals"]
+                              if signal["point_mapping_id"] == point_id)
+    assert temperature_health["quality_state"] == "VALID"
+    assert temperature_health["simulated"] is True
     assert client.post(f"/api/point-mappings/{point_id}/reject").json()["mapping_status"] == "REJECTED"
     assert client.delete(f"/api/point-mappings/{point_id}").json()["mapping_status"] == "INACTIVE"
     assert client.get(f"/api/devices/{device.json()['device_id']}/points").json()["points"][0]["point_mapping_id"] == point_id

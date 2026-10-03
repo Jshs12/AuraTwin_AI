@@ -274,10 +274,29 @@ class IntegrationRecord(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="UNCONFIGURED", server_default="UNCONFIGURED")
     configuration: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     credential_reference: Mapped[str | None] = mapped_column(String(500))
+    connection_state: Mapped[str] = mapped_column(String(24), nullable=False, default="DISCONNECTED", server_default="DISCONNECTED")
+    commissioning_state: Mapped[str] = mapped_column(String(32), nullable=False, default="CONFIGURED", server_default="CONFIGURED")
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(240))
+    configuration_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     building: Mapped[BuildingRecord] = relationship(back_populates="integrations")
     devices: Mapped[list["DeviceRecord"]] = relationship(back_populates="integration", cascade="all, delete-orphan")
+    lifecycle_events: Mapped[list["IntegrationLifecycleEventRecord"]] = relationship(back_populates="integration", cascade="all, delete-orphan")
+
+
+class IntegrationLifecycleEventRecord(Base):
+    __tablename__ = "integration_lifecycle_events"
+    lifecycle_event_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    integration_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("integrations.integration_id", ondelete="CASCADE"), nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String(48), nullable=False)
+    previous_state: Mapped[str | None] = mapped_column(String(32))
+    new_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    source: Mapped[str] = mapped_column(String(100), nullable=False, default="aura_twin")
+    simulated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    integration: Mapped[IntegrationRecord] = relationship(back_populates="lifecycle_events")
 
 
 class DeviceRecord(TimestampMixin, Base):

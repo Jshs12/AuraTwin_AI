@@ -244,6 +244,28 @@ export const api = {
     if (!res.ok) throw new Error(data.detail || "Unable to validate integration configuration");
     return data;
   },
+  async discoverIntegration(integrationId: string) {
+    const res = await authFetch(`${API_BASE}/integrations/${encodeURIComponent(integrationId)}/discover`, { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Unable to request simulated discovery");
+    return data;
+  },
+  async getIntegrationCommissioning(integrationId: string) {
+    const res = await authFetch(`${API_BASE}/integrations/${encodeURIComponent(integrationId)}/commissioning`);
+    if (!res.ok) throw new Error("Unable to load commissioning status");
+    return res.json();
+  },
+  async evaluateIntegrationCommissioning(integrationId: string) {
+    const res = await authFetch(`${API_BASE}/integrations/${encodeURIComponent(integrationId)}/commissioning/evaluate`, { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "Unable to evaluate commissioning");
+    return data;
+  },
+  async getIntegrationHealth(integrationId: string) {
+    const res = await authFetch(`${API_BASE}/integrations/${encodeURIComponent(integrationId)}/health`);
+    if (!res.ok) throw new Error("Unable to load integration health");
+    return res.json();
+  },
   async getIntegrationDevices(integrationId: string) {
     const res = await authFetch(`${API_BASE}/integrations/${encodeURIComponent(integrationId)}/devices`);
     if (!res.ok) throw new Error("Unable to load devices");

@@ -2,11 +2,32 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class StrictInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class IntegrationConnectionState(StrEnum):
+    DISCONNECTED = "DISCONNECTED"
+    CONNECTING = "CONNECTING"
+    CONNECTED = "CONNECTED"
+    DEGRADED = "DEGRADED"
+    ERROR = "ERROR"
+
+
+class CommissioningState(StrEnum):
+    CONFIGURED = "CONFIGURED"
+    CONNECTION_TEST_PENDING = "CONNECTION_TEST_PENDING"
+    CONNECTION_TESTED = "CONNECTION_TESTED"
+    DISCOVERY_REVIEW = "DISCOVERY_REVIEW"
+    MAPPING_REVIEW = "MAPPING_REVIEW"
+    READ_ONLY_READY = "READ_ONLY_READY"
+    READ_ONLY_MONITORING = "READ_ONLY_MONITORING"
+    BLOCKED = "BLOCKED"
+    SIMULATED_COMMISSIONING = "SIMULATED_COMMISSIONING"
 
 
 def _safe_configuration(value: dict[str, Any]) -> dict[str, Any]:
