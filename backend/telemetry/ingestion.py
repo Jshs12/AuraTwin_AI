@@ -15,6 +15,8 @@ from backend.schemas.data_quality import QualityState
 from backend.schemas.provider_observation import ProviderObservation, ObservationIngestionResult
 from backend.schemas.telemetry import TelemetryObservation, TelemetrySignal
 from backend.services.data_quality import DataQualityGate
+from backend.core.events import EventTrace
+from backend.core.time import utc_now
 
 
 class RuntimeObservationConsumer:
@@ -36,6 +38,7 @@ class ResolvedPoint:
     zone_capacity: int
     signal: TelemetrySignal
     unit: str
+    protocol: str
 
 
 class ProviderObservationIngestionService:
@@ -99,7 +102,7 @@ class ProviderObservationIngestionService:
             return None, "POINT_DATA_TYPE_UNSUPPORTED"
         return ResolvedPoint(str(building.organization_id), str(building.building_id),
             str(floor.floor_id), str(zone.zone_id), zone.zone_key, zone.capacity,
-            signal, point.unit or self._default_unit(signal)), None
+            signal, point.unit or self._default_unit(signal), integration.integration_type), None
 
     @staticmethod
     def _default_unit(signal: TelemetrySignal) -> str:
@@ -126,10 +129,52 @@ class ProviderObservationIngestionService:
 
     def ingest(self, observation: ProviderObservation) -> ObservationIngestionResult:
         resolved, rejection = self.resolve(observation)
+        result = self._ingest(observation, resolved, rejection).model_copy(update={
+            "integration_id": observation.integration_id,
+            "device_id": observation.device_id,
+            "point_mapping_id": observation.point_mapping_id,
+            "protocol": resolved.protocol if resolved is not None else None})
+        event_zone = result.zone_id or f"integration:{observation.integration_id}"
+        base_payload = {"integration_id": observation.integration_id,
+            "signal": result.signal or observation.signal, "observed_at": observation.observed_at,
+            "source": observation.source, "simulated": observation.simulated,
+            "quality_state": result.quality_state.value if result.quality_state else None}
+        EventTrace.log_event("OBSERVATION_RECEIVED", event_zone, "provider_observation", base_payload)
+        if result.accepted:
+            EventTrace.log_event("OBSERVATION_ACCEPTED", event_zone, "provider_observation",
+                {**base_payload, "persisted": result.persisted, "runtime_applicable": result.runtime_applicable,
+                 "runtime_input_applied": result.runtime_input_applied,
+                 "ingested_at": result.ingested_at})
+        else:
+            reason = result.reason_code or "OBSERVATION_REJECTED"
+            if reason.startswith("MAPPING_") or reason in {"MAPPING_OR_OWNERSHIP_NOT_FOUND", "OWNERSHIP_CHAIN_INVALID"}:
+                event_type = "MAPPING_REJECTED"
+            elif result.quality_state == QualityState.STALE:
+                event_type = "STALE_OBSERVATION"
+            elif result.quality_state in {QualityState.INVALID, QualityState.OUT_OF_RANGE}:
+                event_type = "INVALID_OBSERVATION"
+            else:
+                event_type = "OBSERVATION_REJECTED"
+            EventTrace.log_event(event_type, event_zone, "provider_observation",
+                {**base_payload, "reason_code": reason}, status="FAILED")
+        return result
+
+    def _ingest(self, observation: ProviderObservation, resolved: ResolvedPoint | None,
+                rejection: str | None) -> ObservationIngestionResult:
         if resolved is None:
             return ObservationIngestionResult(accepted=False, reason_code=rejection,
                 observed_at=observation.observed_at, source=observation.source,
                 simulated=observation.simulated, quality_state=observation.quality_state)
+        if observation.signal is not None and observation.signal != resolved.signal.value:
+            return ObservationIngestionResult(accepted=False, signal=resolved.signal.value,
+                zone_id=resolved.zone_id, observed_at=observation.observed_at, source=observation.source,
+                simulated=observation.simulated, quality_state=QualityState.INVALID,
+                reason_code="PROVIDER_SIGNAL_MISMATCH")
+        if observation.unit is not None and observation.unit != resolved.unit:
+            return ObservationIngestionResult(accepted=False, signal=resolved.signal.value,
+                zone_id=resolved.zone_id, observed_at=observation.observed_at, source=observation.source,
+                simulated=observation.simulated, quality_state=QualityState.INVALID,
+                reason_code="PROVIDER_UNIT_MISMATCH")
         if not self._unit_is_compatible(resolved.signal, resolved.unit):
             return ObservationIngestionResult(accepted=False, signal=resolved.signal.value,
                 zone_id=resolved.zone_id, observed_at=observation.observed_at, source=observation.source,
@@ -163,7 +208,9 @@ class ProviderObservationIngestionService:
             return ObservationIngestionResult(accepted=False, signal=resolved.signal.value,
                 zone_id=resolved.zone_id, observed_at=observation.observed_at, source=observation.source,
                 simulated=observation.simulated, quality_state=quality, reason_code=reason or quality.value)
-        if observation.runtime_input and self.runtime_consumer is None:
+        runtime_applicable = observation.runtime_input and resolved.signal in {
+            TelemetrySignal.OCCUPANCY, TelemetrySignal.TEMPERATURE, TelemetrySignal.COOLING_SETPOINT}
+        if runtime_applicable and self.runtime_consumer is None:
             return ObservationIngestionResult(accepted=False, signal=resolved.signal.value,
                 zone_id=resolved.zone_id, observed_at=observation.observed_at, source=observation.source,
                 simulated=observation.simulated, quality_state=quality,
@@ -182,22 +229,28 @@ class ProviderObservationIngestionService:
                 simulated=observation.simulated, quality_state=quality, reason_code="PERSISTENCE_FAILED")
         runtime_applied = False
         reason_code = None
-        if observation.runtime_input and self.runtime_consumer is not None:
-            if resolved.signal not in {TelemetrySignal.OCCUPANCY, TelemetrySignal.TEMPERATURE,
-                                       TelemetrySignal.COOLING_SETPOINT}:
-                reason_code = "SIGNAL_HISTORICAL_ONLY"
-            else:
-                runtime_applied = bool(self.runtime_consumer.apply_current_observation(
-                    organization_id=resolved.organization_id, building_id=resolved.building_id,
-                    floor_id=resolved.floor_id, zone_id=resolved.zone_id, zone_key=resolved.zone_key,
-                    signal=resolved.signal.value, value=float(observation.value),
-                    observed_at=observation.observed_at, source=observation.source,
-                    simulated=observation.simulated, quality_state=quality))
-                if not runtime_applied:
-                    reason_code = "RUNTIME_STATE_REJECTED"
+        if runtime_applicable and self.runtime_consumer is not None and inserted > 0:
+            runtime_applied = bool(self.runtime_consumer.apply_current_observation(
+                organization_id=resolved.organization_id, building_id=resolved.building_id,
+                floor_id=resolved.floor_id, zone_id=resolved.zone_id, zone_key=resolved.zone_key,
+                signal=resolved.signal.value, value=float(observation.value),
+                observed_at=observation.observed_at, source=observation.source,
+                simulated=observation.simulated, quality_state=quality))
+            if not runtime_applied:
+                reason_code = "RUNTIME_STATE_REJECTED"
+        elif runtime_applicable and inserted == 0:
+            reason_code = "DUPLICATE"
         else:
-            reason_code = "DUPLICATE" if inserted == 0 else None
+            reason_code = "DUPLICATE" if inserted == 0 else "SIGNAL_HISTORICAL_ONLY"
+        persisted_record = self.telemetry_service.find_persisted_boundary(
+            zone_id=resolved.zone_id, signal=resolved.signal, value=float(observation.value),
+            unit=resolved.unit, observed_at=observation.observed_at.astimezone(timezone.utc),
+            source=observation.source, quality_state=quality.value, simulated=observation.simulated)
         return ObservationIngestionResult(accepted=True, persisted=inserted > 0, duplicate=inserted == 0,
             signal=resolved.signal.value, zone_id=resolved.zone_id, observed_at=observation.observed_at,
             source=observation.source, simulated=observation.simulated, quality_state=quality,
-            reason_code=reason_code, runtime_input_applied=runtime_applied)
+            reason_code=reason_code, runtime_input_applied=runtime_applied,
+            runtime_applicable=runtime_applicable, organization_id=resolved.organization_id,
+            building_id=resolved.building_id, floor_id=resolved.floor_id, unit=resolved.unit,
+            ingested_at=persisted_record.ingested_at if persisted_record else utc_now(),
+            value=float(observation.value))

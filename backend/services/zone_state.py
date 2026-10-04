@@ -7,6 +7,7 @@ import json
 from backend.services.data_quality import DataQualityGate
 from backend.schemas.data_quality import QualityState
 from backend.core.time import utc_now
+from datetime import timezone
 
 class ZoneStateService:
     def __init__(
@@ -197,6 +198,18 @@ class ZoneStateService:
             return False
 
         current = dict(self._runtime_observations.get(canonical_zone_id, {}))
+        previous = current.get(signal)
+        if previous is not None:
+            previous_at = previous["observed_at"]
+            current_at = observed_at
+            if (current_at.tzinfo is None or current_at.utcoffset() is None
+                    or previous_at.tzinfo is None or previous_at.utcoffset() is None
+                    or current_at.astimezone(timezone.utc) <= previous_at.astimezone(timezone.utc)):
+                EventTrace.log_event("RUNTIME_OBSERVATION_REJECTED", canonical_zone_id,
+                    "runtime_observation", {"signal": signal,
+                    "reason_code": "OBSERVATION_NOT_NEWER", "source": source,
+                    "simulated": bool(simulated)}, status="FAILED")
+                return False
         current[signal] = {"value": value, "observed_at": observed_at,
                            "source": source, "simulated": bool(simulated)}
         candidate = self._apply_runtime_observations(base, observations=current)

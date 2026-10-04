@@ -12,10 +12,14 @@ class ProviderObservation(BaseModel):
     point_mapping_id: str
     observed_at: datetime
     value: float = Field(strict=True, allow_inf_nan=False)
-    source: str = Field(min_length=1, max_length=160)
+    # A source is a stable identifier, never a URL/connection string or free-form payload.
+    source: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_.-]+$")
     simulated: bool = Field(strict=True)
     quality_state: QualityState | None = None
     runtime_input: bool = False
+    # Optional provider hints; the confirmed mapping remains authoritative.
+    signal: str | None = None
+    unit: str | None = None
 
     @field_validator("observed_at")
     @classmethod
@@ -37,6 +41,17 @@ class ObservationIngestionResult(BaseModel):
     quality_state: QualityState | None = None
     reason_code: str | None = None
     runtime_input_applied: bool = False
+    runtime_applicable: bool = False
+    organization_id: str | None = None
+    building_id: str | None = None
+    floor_id: str | None = None
+    unit: str | None = None
+    ingested_at: datetime | None = None
+    value: float | None = None
+    integration_id: str | None = None
+    device_id: str | None = None
+    point_mapping_id: str | None = None
+    protocol: str | None = None
 
 
 class SimulatedObservationRequest(BaseModel):

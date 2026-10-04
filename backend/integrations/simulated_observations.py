@@ -22,6 +22,7 @@ class ExplicitValueSimulatedProvider:
             results.append(ProviderObservation(integration_id=integration_id, device_id=device_id,
                 point_mapping_id=point_id, observed_at=observed_at, value=values[point_id],
                 source=self.provider_name, simulated=True,
+                signal=point.logical_signal, unit=point.unit,
                 runtime_input=bool(runtime_input and point.logical_signal in {
                     "occupancy", "temperature", "cooling_setpoint"})))
         return results

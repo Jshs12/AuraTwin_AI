@@ -21,6 +21,7 @@ from backend.integrations.mapping_suggestions import suggest_mapping
 from backend.integrations.commissioning import evaluate_commissioning
 from backend.services.data_quality import DataQualityGate
 from backend.schemas.data_quality import QualityState
+from backend.core.events import EventTrace
 from backend.security.dependencies import require_building_access, require_permission
 from backend.security.roles import Permission
 
@@ -130,6 +131,25 @@ def _audit(request, user, action, resource, resource_id, building_id, metadata=N
     request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
         action=action, resource=resource, resource_id=resource_id, building_id=building_id,
         success=success, metadata=metadata)
+
+
+def _record_observation_outcome(request, user, integration_id, building_id, point_id, outcome):
+    """Keep a sanitized latest-attempt summary in the existing bounded audit service."""
+    allowed = {key: outcome.get(key) for key in (
+        "accepted", "reason_code", "signal", "logical_signal", "unit", "protocol", "mapping_status", "observed_at",
+        "ingested_at", "quality_state", "source", "simulated", "runtime_applicable",
+        "runtime_input_applied", "persisted")}
+    request.app.state.audit_service.record(user_id=user.user_id, role=user.role.value,
+        action="integration_observation_result", resource="point_mapping",
+        resource_id=str(point_id), building_id=str(building_id), success=bool(outcome.get("accepted")),
+        metadata={"integration_id": str(integration_id), **allowed})
+
+
+def _log_adapter_observation_rejection(integration_id, point_id, reason_code, signal=None):
+    EventTrace.log_event("OBSERVATION_REJECTED", f"integration:{integration_id}",
+        "read_only_adapter", {"integration_id": str(integration_id),
+        "point_mapping_id": str(point_id), "signal": signal,
+        "reason_code": reason_code}, status="FAILED")
 
 
 @router.get("/buildings/{building_id}/integrations")
@@ -512,34 +532,81 @@ def poll_integration(integration_id: str, request: Request,
                        point.logical_signal, point.unit)
                       for point in points]
         timeout_seconds = float(getattr(request.app.state, "integration_adapter_timeout_seconds", 5.0))
+    health = _safe_adapter_health(adapter, timeout_seconds)
     results = []
     adapter_failure = None
+    if health is None or health.state != ConnectionState.CONNECTED.value:
+        adapter_failure = "ADAPTER_UNAVAILABLE"
+        for point_id, _external_id, _device_id, logical_signal, _unit in point_data:
+            item = {"point_mapping_id": str(point_id), "accepted": False,
+                "reason_code": "ADAPTER_UNAVAILABLE", "logical_signal": logical_signal,
+                "mapping_status": "CONFIRMED", "simulated": bool(health.simulated) if health else None}
+            results.append(item)
+            _log_adapter_observation_rejection(integration_id, point_id, "ADAPTER_UNAVAILABLE", logical_signal)
+            _record_observation_outcome(request, user, integration_id, integration.building_id,
+                                        point_id, item)
+        point_data = []
     for point_id, external_id, device_id, logical_signal, unit in point_data:
         try:
             observation = run_bounded(lambda: adapter.observe(external_id), timeout_seconds)
             if not isinstance(observation, ProviderObservation):
                 adapter_failure = "OBSERVATION_ERROR"
                 results.append({"point_mapping_id": str(point_id), "accepted": False,
-                                "reason_code": "OBSERVATION_FORMAT_INVALID"})
+                                "reason_code": "OBSERVATION_FORMAT_INVALID",
+                                "logical_signal": logical_signal, "mapping_status": "CONFIRMED"})
+                _log_adapter_observation_rejection(integration_id, point_id, "OBSERVATION_FORMAT_INVALID", logical_signal)
+                _record_observation_outcome(request, user, integration_id, integration.building_id,
+                    point_id, results[-1])
                 continue
             if (observation.integration_id != integration_id or observation.device_id != str(device_id)
                     or observation.point_mapping_id != str(point_id)):
                 adapter_failure = "OBSERVATION_ERROR"
                 results.append({"point_mapping_id": str(point_id), "accepted": False,
-                                "reason_code": "OBSERVATION_IDENTITY_MISMATCH"})
+                                "reason_code": "OBSERVATION_IDENTITY_MISMATCH",
+                                "logical_signal": logical_signal, "mapping_status": "CONFIRMED"})
+                _log_adapter_observation_rejection(integration_id, point_id, "OBSERVATION_IDENTITY_MISMATCH", logical_signal)
+                _record_observation_outcome(request, user, integration_id, integration.building_id,
+                    point_id, results[-1])
                 continue
+            if observation.simulated != bool(health.simulated) or (
+                    not observation.simulated and not getattr(
+                        getattr(adapter, "capabilities", None), "physical_io", False)):
+                item = {"point_mapping_id": str(point_id), "accepted": False,
+                    "reason_code": "PROVENANCE_UNVERIFIED", "logical_signal": logical_signal,
+                    "simulated": observation.simulated, "source": observation.source,
+                    "observed_at": observation.observed_at.isoformat()}
+                results.append(item)
+                _log_adapter_observation_rejection(integration_id, point_id, "PROVENANCE_UNVERIFIED", logical_signal)
+                _record_observation_outcome(request, user, integration_id, integration.building_id,
+                                            point_id, item)
+                continue
+            observation = observation.model_copy(update={
+                "runtime_input": logical_signal in {"occupancy", "temperature", "cooling_setpoint"}})
             result = request.app.state.provider_observation_ingestion_service.ingest(observation)
-            results.append({**result.model_dump(mode="json"), "logical_signal": logical_signal,
-                            "unit": unit})
+            item = {**result.model_dump(mode="json"), "logical_signal": logical_signal,
+                    "unit": result.unit or unit, "point_mapping_id": str(point_id),
+                    "mapping_status": "CONFIRMED"}
+            results.append(item)
+            _record_observation_outcome(request, user, integration_id, integration.building_id,
+                                        point_id, item)
         except AdapterTimeout:
             adapter_failure = "CONNECT_TIMEOUT"
-            results.append({"point_mapping_id": str(point_id), "accepted": False,
-                            "reason_code": "OBSERVATION_TIMEOUT"})
+            item = {"point_mapping_id": str(point_id), "accepted": False,
+                    "reason_code": "OBSERVATION_TIMEOUT", "logical_signal": logical_signal,
+                    "simulated": bool(health.simulated) if health else None, "mapping_status": "CONFIRMED"}
+            results.append(item)
+            _log_adapter_observation_rejection(integration_id, point_id, "OBSERVATION_TIMEOUT", logical_signal)
+            _record_observation_outcome(request, user, integration_id, integration.building_id,
+                                        point_id, item)
         except Exception:
             adapter_failure = "OBSERVATION_ERROR"
-            results.append({"point_mapping_id": str(point_id), "accepted": False,
-                            "reason_code": "OBSERVATION_ERROR"})
-    health = _safe_adapter_health(adapter, timeout_seconds)
+            item = {"point_mapping_id": str(point_id), "accepted": False,
+                    "reason_code": "OBSERVATION_ERROR", "logical_signal": logical_signal,
+                    "simulated": bool(health.simulated) if health else None, "mapping_status": "CONFIRMED"}
+            results.append(item)
+            _log_adapter_observation_rejection(integration_id, point_id, "OBSERVATION_ERROR", logical_signal)
+            _record_observation_outcome(request, user, integration_id, integration.building_id,
+                                        point_id, item)
     if adapter_failure:
         with _session(request).begin() as session:
             current = _integration(session, request, user, integration_id, write=True)
@@ -548,8 +615,19 @@ def poll_integration(integration_id: str, request: Request,
                     source="read_only_adapter", simulated=bool(health.simulated),
                     error_code=adapter_failure)
             response_state = current.connection_state
+        EventTrace.log_event("INTEGRATION_DEGRADED", f"integration:{integration_id}",
+            "read_only_adapter", {"integration_id": integration_id,
+            "reason_code": adapter_failure}, status="FAILED")
     else:
         response_state = ConnectionState.CONNECTED.value
+    accepted_times = [datetime.fromisoformat(item["observed_at"].replace("Z", "+00:00"))
+        for item in results if item.get("accepted") and isinstance(item.get("observed_at"), str)]
+    if accepted_times:
+        newest = max(accepted_times).astimezone(timezone.utc)
+        with _session(request).begin() as session:
+            current = _integration(session, request, user, integration_id, write=True)
+            if current.last_seen_at is None or newest > _aware(current.last_seen_at).astimezone(timezone.utc):
+                current.last_seen_at = newest
     _audit(request, user, "integration_read_only_poll", "integration", integration_id,
            str(integration.building_id), metadata={"observation_count": len(results)},
            success=adapter_failure is None)
@@ -800,6 +878,21 @@ def get_integration_health(integration_id: str, request: Request,
                 "simulated": bool(observation.simulated) if observation else None})
         adapter_health = _safe_adapter_health(adapter,
             float(getattr(request.app.state, "integration_adapter_timeout_seconds", 5.0)))
+        point_ids = {str(point.point_mapping_id) for point in points}
+        outcomes = [record for record in request.app.state.audit_service.list_records()
+            if record.action == "integration_observation_result" and record.resource_id in point_ids
+            and record.metadata.get("integration_id") == str(integration.integration_id)]
+        latest_outcome = None
+        if outcomes:
+            record = outcomes[-1]
+            latest_outcome = {**record.metadata, "attempted_at": record.timestamp.isoformat()}
+        has_valid_observation = any(item["quality_state"] == QualityState.VALID.value
+                                    for item in signals)
+        latest_quality = latest_outcome.get("quality_state") if latest_outcome else None
+        observation_status = ("STALE" if latest_quality == QualityState.STALE.value else
+            "NO_VALID_OBSERVATIONS" if not has_valid_observation else
+            "VALID" if latest_quality == QualityState.VALID.value else
+            "REJECTED" if latest_outcome and not latest_outcome.get("accepted") else "VALID")
         return {"integration_id": str(integration.integration_id), "building_id": str(integration.building_id),
             "connection_state": integration.connection_state, "last_seen_at": integration.last_seen_at,
             "last_error": integration.last_error,
@@ -809,6 +902,8 @@ def get_integration_health(integration_id: str, request: Request,
                 and adapter_health and not adapter_health.simulated
                 and getattr(getattr(adapter, "capabilities", None), "physical_io", False)),
             "adapter_health": adapter_health.state if adapter_health else "NOT_CONFIGURED",
+            "observation_status": observation_status,
+            "last_observation": latest_outcome,
             "capabilities": _adapter_capabilities(adapter),
             "read_only": True, "write_capability": False, "signals": signals}
 
@@ -986,6 +1081,12 @@ def create_simulated_point_observation(point_id: str, body: SimulatedObservation
         raise HTTPException(status_code=409, detail={"code": "MAPPING_NOT_CONFIRMED_OR_READABLE",
             "message": "A confirmed, readable point mapping is required."})
     result = request.app.state.provider_observation_ingestion_service.ingest(emitted[0])
+    item = result.model_dump(mode="json")
+    item["logical_signal"] = emitted[0].signal
+    item["point_mapping_id"] = point_id
+    item["mapping_status"] = "CONFIRMED"
+    _record_observation_outcome(request, user, integration.integration_id,
+        integration.building_id, point_id, item)
     if not result.accepted:
         raise HTTPException(status_code=422, detail={"code": "OBSERVATION_REJECTED",
             "reason_code": result.reason_code, "quality_state": result.quality_state.value

@@ -215,8 +215,18 @@ def test_adapter_observation_provenance_flows_through_existing_ingestion():
         assert record["accepted"] is True
         assert record["source"] == "simulated_test_adapter"
         assert record["simulated"] is True
+        assert record["runtime_applicable"] is True
+        assert record["runtime_input_applied"] is True
+        assert record["mapping_status"] == "CONFIRMED"
+        assert record["organization_id"]
+        assert record["unit"] == "°C"
+        assert record["ingested_at"]
         observed_at = datetime.fromisoformat(record["observed_at"].replace("Z", "+00:00"))
         assert observed_at == observation.observed_at
+        health = client.get(f"/api/integrations/{integration['integration_id']}/health").json()
+        assert health["observation_status"] == "VALID"
+        assert health["last_observation"]["accepted"] is True
+        assert health["last_observation"]["runtime_input_applied"] is True
     finally:
         app.state.integration_adapter_registry = original
 

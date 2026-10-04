@@ -5,7 +5,7 @@ type Integration = { integration_id: string; name: string; integration_type: str
 type Device = { device_id: string; name: string; external_device_id: string; device_type: string; manufacturer?: string | null; model?: string | null; zone_id?: string | null; status?: string };
 type Point = { point_mapping_id: string; external_point_id: string; logical_signal: string; unit?: string | null; readable?: boolean; writable?: boolean; zone_id: string | null; mapping_status: string; mapping_confidence: number | null; mapping_source: string | null; latestObservation?: Record<string, unknown> | null };
 type Commissioning = { state: string; read_only_ready: boolean; message: string; active_devices: number; confirmed_readable_mappings: number; observation_quality: string[]; simulated: boolean };
-type IntegrationHealth = { connection_state: string; last_seen_at?: string | null; last_error?: string | null; physical_connection_implemented: boolean; signals: Array<{ signal: string; quality_state: string; source?: string | null; simulated?: boolean | null }> };
+type IntegrationHealth = { connection_state: string; last_seen_at?: string | null; last_error?: string | null; physical_connection_implemented: boolean; observation_status?: string; last_observation?: Record<string, unknown> | null; signals: Array<{ signal: string; quality_state: string; source?: string | null; simulated?: boolean | null }> };
 
 export function IntegrationConfiguration({ buildingId, zones }: { buildingId?: string; zones: Array<{ zone_id: string; name: string }> }) {
   const [integrations, setIntegrations] = useState<Integration[]>([]);
@@ -19,6 +19,7 @@ export function IntegrationConfiguration({ buildingId, zones }: { buildingId?: s
   const [controlPolicy, setControlPolicy] = useState<{ ready: boolean; missing_configuration: string[]; invalid_configuration: string[] } | null>(null);
   const [commissioning, setCommissioning] = useState<Commissioning | null>(null);
   const [health, setHealth] = useState<IntegrationHealth | null>(null);
+  const [observationResults, setObservationResults] = useState<Array<Record<string, unknown>>>([]);
 
   const loadPoints = async (deviceId: string): Promise<Point[]> => {
     const items = await api.getDevicePoints(deviceId) as Point[];
@@ -67,6 +68,8 @@ export function IntegrationConfiguration({ buildingId, zones }: { buildingId?: s
     try {
       const result = await api.createSimulatedPointObservation(
         point.point_mapping_id, value, new Date().toISOString());
+      setObservationResults([{ ...result, logical_signal: point.logical_signal,
+        mapping_status: point.mapping_status, point_mapping_id: point.point_mapping_id }]);
       if (selectedDevice) setPoints(await loadPoints(selectedDevice));
       setNotice(result.runtime_input_applied
         ? "SIMULATED observation accepted; current ZoneState updated after quality and freshness checks."
@@ -159,8 +162,10 @@ export function IntegrationConfiguration({ buildingId, zones }: { buildingId?: s
           setTestReport(`Adapter ${report.connection_state} · ${report.error_code ?? (report.connection_established ? "connection test succeeded" : "Physical adapter not configured")} · READ-ONLY · writes=${report.capabilities?.can_write ?? false}`);
         }))}>Test adapter connection</button>}
         {item.connection_state === "CONNECTED" && <>
-          <button style={{ marginLeft: ".5rem" }} onClick={() => void run(() => api.pollIntegration(item.integration_id).then(report => {
-            setTestReport(`One read-only poll · ${report.observations.length} point result(s) · ${report.simulated ? "SIMULATED" : "REAL PROVIDER"}`);
+          <button style={{ marginLeft: ".5rem" }} onClick={() => void run(() => api.pollIntegration(item.integration_id).then((report: any) => {
+            setObservationResults(report.observations ?? []);
+            const accepted = (report.observations ?? []).filter((row: any) => row.accepted).length;
+            setTestReport(`One read-only poll · ${accepted}/${report.observations.length} accepted · ${report.simulated ? "SIMULATED" : "PROVIDER REPORTED"}`);
           }))}>Poll once</button>
           <button style={{ marginLeft: ".5rem" }} onClick={() => void run(() => api.disconnectIntegration(item.integration_id))}>Disconnect</button>
         </>}
@@ -170,13 +175,30 @@ export function IntegrationConfiguration({ buildingId, zones }: { buildingId?: s
         {item.status !== "DISABLED" && <button style={{ marginLeft: ".5rem" }} onClick={() => void run(() => api.disableIntegration(item.integration_id))}>Disable</button>}
       </div>)}
       {testReport && <p role="status">{testReport}</p>}
+      {observationResults.length > 0 && <div aria-label="Read-only observation results">
+        <strong>READ-ONLY OBSERVATION RESULTS</strong>
+        {observationResults.map((row, index) => <small key={`${String(row.point_mapping_id ?? index)}-${index}`} style={{ display: "block", marginTop: ".35rem" }}>
+          {String(row.logical_signal ?? row.signal ?? "unknown signal")} · {row.accepted ? "ACCEPTED" : "REJECTED"}
+          {row.value !== undefined ? ` · ${String(row.value)} ${String(row.unit ?? "")}` : ""}
+          {row.quality_state ? ` · quality ${String(row.quality_state)}` : ""}
+          {row.observed_at ? ` · observed ${String(row.observed_at)}` : ""}
+          {row.ingested_at ? ` · ingested ${String(row.ingested_at)}` : ""}
+          {row.source ? ` · ${String(row.source)}` : ""}
+          {row.protocol ? ` · protocol ${String(row.protocol)}` : ""}
+          {row.simulated === true ? " · SIMULATED" : row.simulated === false ? " · PROVIDER REPORTED" : ""}
+          {row.mapping_status ? ` · mapping ${String(row.mapping_status)}` : ""}
+          {row.runtime_applicable !== undefined ? ` · runtime ${row.runtime_input_applied ? "APPLIED" : row.runtime_applicable ? "NOT APPLIED" : "HISTORICAL ONLY"}` : ""}
+          {row.reason_code ? ` · reason ${String(row.reason_code)}` : ""}
+        </small>)}
+      </div>}
       {selectedIntegration && <div className="section-block" aria-label="Integration commissioning status">
         <div className="card-title">COMMISSIONING · READ ONLY</div>
         <button onClick={() => void run(() => api.evaluateIntegrationCommissioning(selectedIntegration)
           .then(report => setCommissioning(report)))}>Evaluate commissioning</button>
         <p>{commissioning?.state ?? "Loading"} · {commissioning?.message ?? "Status unavailable"}</p>
         <p>Connection: {health?.connection_state ?? "unknown"} · {health?.physical_connection_implemented ? "VERIFIED ADAPTER" : "SIMULATED / NO PHYSICAL ADAPTER"}</p>
-        <p>Last observation: {health?.last_seen_at ?? "none"} · last error: {health?.last_error ?? "none"}</p>
+        <p>Observation status: {health?.observation_status ?? "unknown"} · last successful observation: {health?.last_seen_at ?? "none"} · last error: {health?.last_error ?? "none"}</p>
+        {health?.last_observation && <small>Last attempt: {String(health.last_observation.accepted ? "ACCEPTED" : "REJECTED")} · {String(health.last_observation.signal ?? health.last_observation.logical_signal ?? "signal unavailable")} · quality {String(health.last_observation.quality_state ?? "unknown")} · {health.last_observation.simulated === true ? "SIMULATED" : "PROVIDER REPORTED / UNKNOWN"} · {String(health.last_observation.reason_code ?? "no rejection reason")}</small>}
         <p>Devices: {commissioning?.active_devices ?? 0} · confirmed readable mappings: {commissioning?.confirmed_readable_mappings ?? 0}</p>
         {health?.signals.map(signal => <small key={signal.signal} style={{ display: "block" }}>{signal.signal}: {signal.quality_state} · {signal.source ?? "no source"} · {signal.simulated === null ? "no observation" : signal.simulated ? "SIMULATED" : "provider reported"}</small>)}
       </div>}
@@ -198,7 +220,7 @@ export function IntegrationConfiguration({ buildingId, zones }: { buildingId?: s
       }))}>Discover points (read-only)</button>}
       {points.map(point => <div key={point.point_mapping_id} style={{ display: "grid", gap: ".4rem", padding: ".6rem 0", borderBottom: "1px solid var(--border-color)" }}>
         <span>{point.external_point_id} → {point.logical_signal} · zone {zones.find(zone => zone.zone_id === point.zone_id)?.name ?? "unassigned"} · {point.mapping_status} · {runtimeSignals.has(point.logical_signal) ? "RUNTIME-CAPABLE AFTER VALIDATION" : "HISTORICAL-ONLY"} · unit {point.unit ?? "unspecified"} · {point.readable ? "readable" : "not readable"} · {point.writable ? "writable" : "read-only"} · source {point.mapping_source ?? "unknown"}{point.mapping_confidence === null ? "" : ` · confidence ${point.mapping_confidence}`}</span>
-        <small>{point.latestObservation ? `Latest: ${String(point.latestObservation.value)} ${String(point.latestObservation.unit)} · ${String(point.latestObservation.quality_state)} · ${point.latestObservation.simulated ? "SIMULATED" : "provider reported"} · ${String(point.latestObservation.source)}` : "No persisted observation"}</small>
+        <small>{point.latestObservation ? `Latest: ${String(point.latestObservation.value)} ${String(point.latestObservation.unit)} · ${String(point.latestObservation.quality_state)} · observed ${String(point.latestObservation.observed_at)} · ingested ${String(point.latestObservation.ingested_at)} · ${point.latestObservation.simulated ? "SIMULATED" : "provider reported"} · ${String(point.latestObservation.source)}` : "No persisted observation"}</small>
         <div style={{ display: "flex", gap: ".5rem" }}>
         <button onClick={() => editPoint(point)}>Edit point / zone</button>
         {point.mapping_status === "CONFIRMED" && <button onClick={() => void simulateObservation(point)}>Add simulated observation</button>}
