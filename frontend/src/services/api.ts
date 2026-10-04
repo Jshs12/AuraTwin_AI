@@ -159,6 +159,17 @@ export const api = {
     if (!res.ok) throw new Error("Unable to load control policy readiness");
     return res.json() as Promise<{ ready: boolean; missing_configuration: string[]; invalid_configuration: string[]; reason_code: string | null }>;
   },
+  async getEdgeStatus(buildingId: string) {
+    const res = await authFetch(`${API_BASE}/edge/status/${encodeURIComponent(buildingId)}`);
+    if (!res.ok) await throwApiError(res, "Unable to load Edge Connector status");
+    return res.json() as Promise<{
+      edge_id: string | null; organization_id: string | null; building_id: string; name: string | null;
+      version: string; mode: "simulated" | "real"; state: string; transport_state: string;
+      queue_depth: number; max_buffer_messages: number; last_heartbeat: string | null;
+      last_observation_forwarded: string | null; simulated: boolean; capabilities: string[];
+      healthy: boolean; reason_code: string | null;
+    }>;
+  },
 
   async getKnowledgeDocuments(buildingId: string) {
     const res = await authFetch(`${API_BASE}/buildings/${encodeURIComponent(buildingId)}/knowledge/documents`);

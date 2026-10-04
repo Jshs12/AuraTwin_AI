@@ -86,6 +86,8 @@ from backend.api.knowledge import router as knowledge_router
 from backend.integrations.connection_test import ConfigurationOnlyTester
 from backend.integrations.discovery import SimulatedFixtureDiscoveryProvider
 from backend.integrations.supervised import AdapterRegistry
+from backend.edge.service import EdgeConnectorService
+from backend.api.edge import router as edge_router
 
 # Configuration/auth and scalar telemetry observations are persistent. Live
 # ZoneState snapshots, event traces, and demo stream history remain runtime-only.
@@ -117,6 +119,9 @@ async def lifespan(application: FastAPI):
         for row in active_rows:
             IntegrationLifecycleManager.transition(session, row, ConnectionState.DISCONNECTED,
                 source="application_startup", simulated=True)
+    edge_connector = getattr(application.state, "edge_connector", None)
+    if edge_connector is not None:
+        edge_connector.start()
     try:
         yield
     finally:
@@ -139,6 +144,8 @@ async def lifespan(application: FastAPI):
             await _restore_demo_runtime()
         if pending_tasks:
             await asyncio.gather(*pending_tasks, return_exceptions=True)
+        if edge_connector is not None:
+            edge_connector.stop()
         registry = getattr(application.state, "integration_adapter_registry", None)
         if registry is not None:
             from uuid import UUID
@@ -307,11 +314,19 @@ app.state.provider_observation_ingestion_service = ProviderObservationIngestionS
     database_sessions, telemetry_service, data_quality=zone_state_service.data_quality_gate,
     runtime_consumer=ZoneStateRuntimeConsumer(zone_state_service),
 )
+app.state.edge_connector = EdgeConnectorService.from_environment(
+    configuration=configuration_repository,
+    sessions=database_sessions,
+    adapter_registry=app.state.integration_adapter_registry,
+    ingestion_service=app.state.provider_observation_ingestion_service,
+    adapter_timeout_seconds=app.state.integration_adapter_timeout_seconds,
+)
 
 app.include_router(monitoring.router, prefix="/api/monitoring")
 app.include_router(configuration_router, prefix="/api")
 app.include_router(integrations_router, prefix="/api")
 app.include_router(knowledge_router, prefix="/api")
+app.include_router(edge_router, prefix="/api")
 
 
 def _public_user(request: Request, user: User):
