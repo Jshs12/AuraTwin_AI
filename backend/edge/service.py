@@ -10,11 +10,13 @@ from sqlalchemy import select
 from backend.core.events import EventTrace
 from backend.database.models import BuildingRecord, DeviceRecord, IntegrationRecord, PointMappingRecord
 from backend.edge.buffer import BoundedObservationBuffer
+from backend.edge.queue import DurableObservationQueue
 from backend.edge.transport import (OutboundTransport, SimulatedOutboundTransport,
-                                    UnavailableRealOutboundTransport)
+                                    OutboundTransportError, UnavailableRealOutboundTransport)
 from backend.integrations.supervised import AdapterTimeout, run_bounded
 from backend.schemas.data_quality import QualityState
-from backend.schemas.edge import (EdgeCapability, EdgeConfiguration, EdgeHealth,
+from backend.schemas.edge import (EdgeCapability, EdgeConfiguration, EdgeDeliveryAcknowledgement,
+                                  EdgeDeliveryStatus, EdgeHealth,
                                   EdgeHeartbeat, EdgeLifecycleState, EdgeMode,
                                   EdgeObservationEnvelope)
 from backend.schemas.provider_observation import ProviderObservation
@@ -47,9 +49,16 @@ def edge_configuration_from_environment() -> tuple[EdgeConfiguration | None, str
             building_id=building_id,
             expected_organization_id=os.environ.get("AURATWIN_EDGE_ORGANIZATION_ID") or None,
             name=os.environ.get("AURATWIN_EDGE_NAME", "AuraTwin Edge Connector"),
-            version=os.environ.get("AURATWIN_EDGE_VERSION", "13.4A"),
+            version=os.environ.get("AURATWIN_EDGE_VERSION", "13.4B"),
             mode=mode,
             max_buffer_messages=capacity,
+            max_attempts=int(os.environ.get("AURATWIN_EDGE_MAX_ATTEMPTS", "5")),
+            retry_base_seconds=float(os.environ.get("AURATWIN_EDGE_RETRY_BASE_SECONDS", "1")),
+            retry_max_seconds=float(os.environ.get("AURATWIN_EDGE_RETRY_MAX_SECONDS", "30")),
+            connection_timeout_seconds=float(os.environ.get("AURATWIN_EDGE_CONNECTION_TIMEOUT_SECONDS", "5")),
+            batch_size=int(os.environ.get("AURATWIN_EDGE_BATCH_SIZE", "25")),
+            outbound_endpoint=os.environ.get("AURATWIN_EDGE_OUTBOUND_ENDPOINT") or None,
+            identity_reference=os.environ.get("AURATWIN_EDGE_IDENTITY_REFERENCE") or None,
         )
         return config, None
     except (ValueError, TypeError):
@@ -77,9 +86,19 @@ class EdgeConnectorService:
         self.last_heartbeat: datetime | None = None
         self.last_observation_forwarded: datetime | None = None
         self.accepting = False
-        self.buffer = BoundedObservationBuffer(config.max_buffer_messages if config else 100)
+        if config is not None and sessions is not None:
+            self.buffer = DurableObservationQueue(sessions, edge_id=config.edge_id,
+                capacity=config.max_buffer_messages, max_attempts=config.max_attempts,
+                retry_base_seconds=config.retry_base_seconds,
+                retry_max_seconds=config.retry_max_seconds)
+        else:
+            # Keeps isolated legacy unit fixtures lightweight; app runtime always supplies SQL sessions.
+            self.buffer = BoundedObservationBuffer(config.max_buffer_messages if config else 100)
         self.transport = transport
         self._started = False
+        self.last_successful_delivery: datetime | None = None
+        self.last_delivery_failure: datetime | None = None
+        self.delivery_status = "IDLE"
 
     @classmethod
     def from_environment(cls, *, configuration, sessions, adapter_registry,
@@ -134,15 +153,24 @@ class EdgeConnectorService:
             return self.status()
         self.building_id = actual_building_id
         self.organization_id = actual_organization_id
+        if isinstance(self.buffer, DurableObservationQueue):
+            recovered = self.buffer.recover_in_flight()
+            if recovered:
+                self._log("EDGE_QUEUE_RECOVERED", {"recovered_count": recovered,
+                    "queue_depth": self.buffer.depth, "simulated": self.simulated})
         if self.config.mode == EdgeMode.SIMULATED:
             if self.transport is None:
                 self.transport = SimulatedOutboundTransport(self._receive_simulated)
+            elif isinstance(self.transport, SimulatedOutboundTransport) and self.transport.receiver is None:
+                self.transport.receiver = self._receive_simulated
             self.transport_state = self.transport.connect()
             self.state = EdgeLifecycleState.RUNNING
             self.reason_code = None
             self._started = True
             self._log("EDGE_STARTED", {"mode": "simulated", "transport_state": self.transport_state,
                                        "simulated": True})
+            self._log("EDGE_TRANSPORT_CONNECTED", {"transport_state": self.transport_state,
+                "simulated": True})
         else:
             if self.transport is None:
                 self.transport = UnavailableRealOutboundTransport()
@@ -177,13 +205,13 @@ class EdgeConnectorService:
 
     def status(self, requested_building_id: str | None = None) -> EdgeHealth:
         if requested_building_id and self.building_id and requested_building_id != self.building_id:
-            return EdgeHealth(building_id=requested_building_id, version="13.4A",
+            return EdgeHealth(building_id=requested_building_id, version="13.4B",
                 mode=self.config.mode if self.config else EdgeMode.SIMULATED,
                 state=EdgeLifecycleState.STOPPED, transport_state="NOT_CONFIGURED",
                 queue_depth=0, max_buffer_messages=0, simulated=False, healthy=False,
                 reason_code="EDGE_NOT_CONFIGURED_FOR_BUILDING")
         if requested_building_id and not self.building_id:
-            return EdgeHealth(building_id=requested_building_id, version="13.4A",
+            return EdgeHealth(building_id=requested_building_id, version="13.4B",
                 mode=self.config.mode if self.config else EdgeMode.SIMULATED,
                 state=EdgeLifecycleState.DEGRADED, transport_state="NOT_CONFIGURED",
                 queue_depth=self.buffer.depth, max_buffer_messages=self.buffer.capacity,
@@ -193,16 +221,26 @@ class EdgeConnectorService:
         mode = self.config.mode if self.config else EdgeMode.SIMULATED
         simulated = self.simulated
         healthy = self.state == EdgeLifecycleState.RUNNING and simulated
+        queue_metrics = self.buffer.metrics() if isinstance(self.buffer, DurableObservationQueue) else {
+            "depth": self.buffer.depth, "oldest": None, "newest": None, "retry_count": 0,
+            "last_failure_at": self.last_delivery_failure, "failed": 0}
         return EdgeHealth(edge_id=self.config.edge_id if self.config else None,
             organization_id=self.organization_id, building_id=building_id,
             name=self.config.name if self.config else None,
-            version=self.config.version if self.config else "13.4A", mode=mode,
+            version=self.config.version if self.config else "13.4B", mode=mode,
             state=self.state, transport_state=self.transport_state,
             queue_depth=self.buffer.depth, max_buffer_messages=self.buffer.capacity,
             last_heartbeat=self.last_heartbeat,
             last_observation_forwarded=self.last_observation_forwarded,
             simulated=simulated, capabilities=self._enabled_capabilities(), healthy=healthy,
-            reason_code=self.reason_code)
+            reason_code=self.reason_code,
+            oldest_queued_observation=queue_metrics["oldest"],
+            newest_queued_observation=queue_metrics["newest"],
+            last_successful_delivery=self.last_successful_delivery,
+            last_delivery_failure=self.last_delivery_failure or queue_metrics["last_failure_at"],
+            retry_count=queue_metrics["retry_count"],
+            queue_full=self.buffer.depth >= self.buffer.capacity,
+            delivery_status=self.delivery_status)
 
     def heartbeat(self) -> EdgeHeartbeat:
         now = datetime.now(timezone.utc)
@@ -210,9 +248,10 @@ class EdgeConnectorService:
         heartbeat = EdgeHeartbeat(edge_id=self.config.edge_id if self.config else "unconfigured",
             organization_id=self.organization_id or "unresolved",
             building_id=self.building_id or (self.config.building_id if self.config else "unconfigured"),
-            connector_version=self.config.version if self.config else "13.4A", timestamp=now,
+            connector_version=self.config.version if self.config else "13.4B", timestamp=now,
             lifecycle_state=self.state, transport_state=self.transport_state,
-            queue_depth=self.buffer.depth, last_observation_timestamp=self.last_observation_forwarded,
+            queue_depth=self.buffer.depth, last_successful_delivery=self.last_successful_delivery,
+            last_observation_timestamp=self.last_observation_forwarded,
             simulated=self.simulated, capabilities=self._enabled_capabilities())
         if self.transport is not None and self.simulated and self.state in {
                 EdgeLifecycleState.RUNNING, EdgeLifecycleState.DEGRADED}:
@@ -277,7 +316,16 @@ class EdgeConnectorService:
                 source=observation.source, quality=quality, simulated=observation.simulated)
         except Exception:
             return self._reject("OBSERVATION_ENVELOPE_INVALID", observation=observation)
-        if not self.buffer.enqueue(envelope):
+        try:
+            enqueued = self.buffer.enqueue(envelope)
+        except Exception:
+            self.state = EdgeLifecycleState.DEGRADED
+            self.reason_code = "QUEUE_PERSISTENCE_FAILED"
+            self._log("EDGE_QUEUE_PERSISTENCE_ERROR", {"reason_code": self.reason_code,
+                "simulated": self.simulated}, failed=True)
+            return {"accepted": False, "forwarded": False,
+                    "reason_code": self.reason_code, "message_id": str(envelope.message_id)}
+        if not enqueued:
             self.reason_code = "BUFFER_FULL"
             self.state = EdgeLifecycleState.DEGRADED
             self._log("EDGE_BUFFER_OVERFLOW", {"message_id": str(envelope.message_id),
@@ -285,6 +333,8 @@ class EdgeConnectorService:
             self._log("EDGE_OBSERVATION_REJECTED", {"reason_code": "BUFFER_FULL",
                 "message_id": str(envelope.message_id)}, failed=True)
             return {"accepted": False, "reason_code": "BUFFER_FULL", "message_id": str(envelope.message_id)}
+        self._log("EDGE_MESSAGE_QUEUED", {"message_id": str(envelope.message_id),
+                                    "queue_depth": self.buffer.depth, "simulated": self.simulated})
         self._log("EDGE_BUFFERED", {"message_id": str(envelope.message_id),
                                     "queue_depth": self.buffer.depth})
         if self.transport is None or self.transport.health() == "UNAVAILABLE":
@@ -306,41 +356,99 @@ class EdgeConnectorService:
         return {"accepted": False, "reason_code": reason_code}
 
     def _drain(self) -> dict:
-        batch = self.buffer.peek()
+        batch = (self.buffer.claim_batch(limit=self.config.batch_size)
+                 if isinstance(self.buffer, DurableObservationQueue)
+                 else self.buffer.peek(self.config.batch_size if self.config else 25))
         if not batch:
-            return {"accepted": True, "forwarded": False, "buffered": False, "queue_depth": 0}
+            return {"accepted": True, "forwarded": False, "buffered": self.buffer.depth > 0,
+                    "queue_depth": self.buffer.depth,
+                    "reason_code": "NO_ELIGIBLE_MESSAGES" if self.buffer.depth else None}
         was_degraded = self.state == EdgeLifecycleState.DEGRADED
+        self.delivery_status = "SENDING"
+        self._log("EDGE_MESSAGE_SEND_ATTEMPT", {"message_ids": [str(item.message_id) for item in batch],
+            "batch_size": len(batch), "queue_depth": self.buffer.depth, "simulated": self.simulated})
         try:
             result = self.transport.send_observation_batch(batch)
-        except Exception:
+        except Exception as error:
+            now = datetime.now(timezone.utc)
             self.state = EdgeLifecycleState.DEGRADED
             self.transport_state = self.transport.health()
-            self.reason_code = "TRANSPORT_SEND_FAILED"
-            self._log("EDGE_TRANSPORT_UNAVAILABLE", {"reason_code": self.reason_code,
+            self.reason_code = (error.reason_code if isinstance(error, OutboundTransportError)
+                                else "TRANSPORT_SEND_FAILED")
+            self.delivery_status = "FAILED"
+            self.last_delivery_failure = now
+            for envelope in batch:
+                may_retry = not isinstance(error, OutboundTransportError) or error.retryable
+                retryable = (self.buffer.fail(envelope.message_id, self.reason_code,
+                    retryable=may_retry, now=now)
+                    if isinstance(self.buffer, DurableObservationQueue) else may_retry)
+                self._log("EDGE_MESSAGE_RETRY" if retryable else "EDGE_MESSAGE_FAILED",
+                    {"message_id": str(envelope.message_id), "reason_code": self.reason_code,
+                     "simulated": self.simulated}, failed=not retryable)
+            self._log("EDGE_TRANSPORT_ERROR", {"reason_code": self.reason_code,
                 "queue_depth": self.buffer.depth}, failed=True)
             return {"accepted": True, "forwarded": False, "buffered": True,
                     "reason_code": self.reason_code, "queue_depth": self.buffer.depth}
-        accepted_ids = tuple(result.accepted_message_ids)
-        self.buffer.acknowledge(accepted_ids)
+        try:
+            ack_items = tuple(self.transport.acknowledge(result))
+        except Exception:
+            ack_items = ()
+        batch_ids = {item.message_id for item in batch}
+        valid_acks: dict[UUID, EdgeDeliveryAcknowledgement] = {}
+        for raw_ack in ack_items:
+            try:
+                ack = raw_ack if isinstance(raw_ack, EdgeDeliveryAcknowledgement) else EdgeDeliveryAcknowledgement.model_validate(raw_ack)
+            except Exception:
+                continue
+            if ack.message_id in batch_ids:
+                valid_acks[ack.message_id] = ack
+        acknowledged_ids = []
+        for envelope in batch:
+            ack = valid_acks.get(envelope.message_id)
+            if ack is None:
+                self.last_delivery_failure = datetime.now(timezone.utc)
+                retryable = (self.buffer.fail(envelope.message_id, "ACK_INVALID_OR_MISSING",
+                    now=self.last_delivery_failure) if isinstance(self.buffer, DurableObservationQueue) else True)
+                self._log("EDGE_MESSAGE_RETRY" if retryable else "EDGE_MESSAGE_FAILED",
+                    {"message_id": str(envelope.message_id), "reason_code": "ACK_INVALID_OR_MISSING",
+                     "simulated": self.simulated}, failed=not retryable)
+            elif ack.status == EdgeDeliveryStatus.REJECTED:
+                self.last_delivery_failure = datetime.now(timezone.utc)
+                if isinstance(self.buffer, DurableObservationQueue):
+                    self.buffer.fail(envelope.message_id, "INGESTION_REJECTED", retryable=False,
+                                     now=self.last_delivery_failure)
+                self._log("EDGE_MESSAGE_FAILED", {"message_id": str(envelope.message_id),
+                    "reason_code": "INGESTION_REJECTED", "simulated": self.simulated}, failed=True)
+            else:
+                acknowledged_ids.append(envelope.message_id)
+                self._log("EDGE_MESSAGE_DUPLICATE" if ack.status == EdgeDeliveryStatus.DUPLICATE
+                    else "EDGE_MESSAGE_ACKED", {"message_id": str(envelope.message_id),
+                    "ack_status": ack.status.value, "simulated": self.simulated,
+                    "transport_state": result.transport_state})
+        removed = self.buffer.acknowledge(tuple(acknowledged_ids))
         self.transport_state = result.transport_state
         now = datetime.now(timezone.utc)
         outcomes = []
-        for envelope, receiver_result in zip(batch, result.receiver_results):
-            if envelope.message_id not in accepted_ids:
-                continue
-            accepted = bool(getattr(receiver_result, "accepted", True))
+        for envelope in batch:
+            ack = valid_acks.get(envelope.message_id)
+            accepted = ack is not None and ack.status in {EdgeDeliveryStatus.ACCEPTED,
+                                                           EdgeDeliveryStatus.DUPLICATE}
             payload = {"message_id": str(envelope.message_id), "integration_id": envelope.integration_id,
                 "signal": envelope.signal, "zone_id": envelope.zone_id,
                 "simulated": envelope.simulated,
                 "transport_state": result.transport_state}
-            self._log("EDGE_OBSERVATION_FORWARDED", payload)
-            if not accepted:
-                self._log("EDGE_OBSERVATION_REJECTED", {**payload,
-                    "reason_code": getattr(receiver_result, "reason_code", None)}, failed=True)
+            if accepted:
+                self._log("EDGE_OBSERVATION_FORWARDED", payload)
+                self.last_observation_forwarded = now
             outcomes.append({"message_id": str(envelope.message_id),
                              "ingestion_accepted": accepted,
-                             "reason_code": getattr(receiver_result, "reason_code", None)})
-            self.last_observation_forwarded = now
+                             "ack_status": ack.status.value if ack else None,
+                             "reason_code": None if ack else "ACK_INVALID_OR_MISSING"})
+        if removed:
+            self.last_successful_delivery = now
+            self.delivery_status = "ACKED"
+        else:
+            self.delivery_status = "FAILED"
         if self.buffer.depth == 0 and self.simulated:
             self.state = EdgeLifecycleState.RUNNING
             self.reason_code = None
@@ -350,7 +458,7 @@ class EdgeConnectorService:
         elif self.buffer.depth:
             self.state = EdgeLifecycleState.DEGRADED
             self.reason_code = "BUFFER_NOT_EMPTY"
-        return {"accepted": True, "forwarded": bool(accepted_ids), "buffered": self.buffer.depth > 0,
+        return {"accepted": True, "forwarded": removed > 0, "buffered": self.buffer.depth > 0,
                 "transport_state": self.transport_state, "queue_depth": self.buffer.depth,
                 "messages": outcomes, "simulated": result.simulated}
 
@@ -366,6 +474,21 @@ class EdgeConnectorService:
             return {"accepted": False, "forwarded": False, "buffered": self.buffer.depth > 0,
                     "reason_code": self.reason_code, "queue_depth": self.buffer.depth}
         return self._drain()
+
+    def retry_failed(self, message_id: UUID) -> dict:
+        """Explicitly re-arm a retained observation after an operator review."""
+        if not isinstance(self.buffer, DurableObservationQueue):
+            return {"accepted": False, "reason_code": "DURABLE_QUEUE_UNAVAILABLE"}
+        if not self.buffer.retry_failed(message_id):
+            return {"accepted": False, "reason_code": "FAILED_MESSAGE_NOT_FOUND"}
+        self.delivery_status = "RETRY_REQUESTED"
+        self.state = EdgeLifecycleState.DEGRADED
+        self.reason_code = "EXPLICIT_RETRY_REQUESTED"
+        self._log("EDGE_MESSAGE_RETRY_REQUESTED", {"message_id": str(message_id),
+            "queue_depth": self.buffer.depth, "simulated": self.simulated})
+        delivery = self.flush()
+        return {"accepted": True, "message_id": str(message_id),
+            "queue_depth": self.buffer.depth, "delivery": delivery}
 
     def poll_integration(self, integration_id: str) -> dict:
         """Explicit read-only orchestration over an already-connected supervised adapter."""
@@ -444,6 +567,8 @@ class EdgeConnectorService:
             except Exception:
                 pass
         self.transport_state = "DISCONNECTED" if not self.simulated else "SIMULATED_IN_PROCESS"
+        self._log("EDGE_TRANSPORT_DISCONNECTED", {"transport_state": self.transport_state,
+            "simulated": self.simulated})
         self.state = EdgeLifecycleState.STOPPED
         self.reason_code = "BUFFER_RETAINED_ON_SHUTDOWN" if self.buffer.depth else None
         self._started = False

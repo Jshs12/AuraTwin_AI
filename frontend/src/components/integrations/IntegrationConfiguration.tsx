@@ -6,7 +6,7 @@ type Device = { device_id: string; name: string; external_device_id: string; dev
 type Point = { point_mapping_id: string; external_point_id: string; logical_signal: string; unit?: string | null; readable?: boolean; writable?: boolean; zone_id: string | null; mapping_status: string; mapping_confidence: number | null; mapping_source: string | null; latestObservation?: Record<string, unknown> | null };
 type Commissioning = { state: string; read_only_ready: boolean; message: string; active_devices: number; confirmed_readable_mappings: number; observation_quality: string[]; simulated: boolean };
 type IntegrationHealth = { connection_state: string; last_seen_at?: string | null; last_error?: string | null; physical_connection_implemented: boolean; observation_status?: string; last_observation?: Record<string, unknown> | null; signals: Array<{ signal: string; quality_state: string; source?: string | null; simulated?: boolean | null }> };
-type EdgeStatus = { edge_id: string | null; building_id: string; version: string; mode: "simulated" | "real"; state: string; transport_state: string; queue_depth: number; max_buffer_messages: number; last_heartbeat: string | null; last_observation_forwarded: string | null; simulated: boolean; capabilities: string[]; healthy: boolean; reason_code: string | null };
+type EdgeStatus = { edge_id: string | null; building_id: string; version: string; mode: "simulated" | "real"; state: string; transport_state: string; queue_depth: number; max_buffer_messages: number; last_heartbeat: string | null; last_observation_forwarded: string | null; simulated: boolean; capabilities: string[]; healthy: boolean; reason_code: string | null; oldest_queued_observation?: string | null; newest_queued_observation?: string | null; last_successful_delivery?: string | null; last_delivery_failure?: string | null; retry_count?: number; queue_full?: boolean; delivery_status?: string };
 
 export function IntegrationConfiguration({ buildingId, zones }: { buildingId?: string; zones: Array<{ zone_id: string; name: string }> }) {
   const [integrations, setIntegrations] = useState<Integration[]>([]);
@@ -138,14 +138,17 @@ export function IntegrationConfiguration({ buildingId, zones }: { buildingId?: s
   };
 
   return <section style={{ display: "grid", gap: "1rem" }}>
-    <div className="card" aria-label="Edge Connector Foundation status">
-      <div className="card-title">EDGE FOUNDATION</div>
+    <div className="card" aria-label="Edge Connector status">
+      <div className="card-title">EDGE CONNECTOR</div>
       {edgeStatus ? <>
         <p>{edgeStatus.reason_code === "EDGE_IDENTITY_NOT_CONFIGURED" || edgeStatus.reason_code === "EDGE_NOT_CONFIGURED_FOR_BUILDING"
           ? "EDGE NOT CONFIGURED FOR THIS BUILDING"
           : edgeStatus.simulated ? "SIMULATED EDGE" : edgeStatus.mode === "real" ? "REAL MODE · TRANSPORT UNAVAILABLE" : "EDGE UNAVAILABLE"} · {edgeStatus.state} · building {edgeStatus.building_id}</p>
-        <p>Transport: {edgeStatus.transport_state} · queue {edgeStatus.queue_depth}/{edgeStatus.max_buffer_messages}</p>
-        <p>Last local heartbeat: {edgeStatus.last_heartbeat ?? "not started"} · last forwarded observation: {edgeStatus.last_observation_forwarded ?? "none"}</p>
+        <p>Transport: {edgeStatus.transport_state} · queue {edgeStatus.queue_depth}/{edgeStatus.max_buffer_messages} · {edgeStatus.delivery_status ?? "IDLE"}</p>
+        <p>Queue full: {edgeStatus.queue_full ? "YES · NEWEST OBSERVATIONS REJECTED" : "NO"} · retries: {edgeStatus.retry_count ?? 0}</p>
+        <p>Oldest queued observation: {edgeStatus.oldest_queued_observation ?? "none"} · last acknowledged delivery: {edgeStatus.last_successful_delivery ?? "none"}</p>
+        <p>Last delivery failure: {edgeStatus.last_delivery_failure ?? "none"} · local heartbeat: {edgeStatus.last_heartbeat ?? "not started"}</p>
+        <p>Last accepted local observation: {edgeStatus.last_observation_forwarded ?? "none"} · {edgeStatus.simulated ? "SIMULATED" : "NOT SIMULATED"}</p>
         <small>Capabilities: {edgeStatus.capabilities.length ? edgeStatus.capabilities.join(", ") : "none"}. No HVAC write or cloud control channel is available.</small>
         {edgeStatus.reason_code && <p role="status">Status reason: {edgeStatus.reason_code}</p>}
       </> : <p>{edgeStatusUnavailable ? "Edge status is unavailable." : "Loading Edge Connector status…"} No cloud connection is implied.</p>}

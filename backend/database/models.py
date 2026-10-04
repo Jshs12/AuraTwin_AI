@@ -426,3 +426,36 @@ class KnowledgeChunkRecord(Base):
     embedding_provider: Mapped[str] = mapped_column(String(80), nullable=False, default="development_hashing_not_semantic", server_default="development_hashing_not_semantic")
 
     version: Mapped[KnowledgeDocumentVersionRecord] = relationship(back_populates="chunks")
+
+
+class EdgeMessageQueueRecord(Base):
+    """Durable, observation-only outbound queue; credentials/control are not representable."""
+
+    __tablename__ = "edge_message_queue"
+    __table_args__ = (
+        ForeignKeyConstraint(["organization_id", "building_id"],
+            ["buildings.organization_id", "buildings.building_id"], ondelete="RESTRICT",
+            name="fk_edge_queue_org_building"),
+        UniqueConstraint("edge_id", "message_id", name="uq_edge_queue_edge_message"),
+        CheckConstraint("delivery_state IN ('PENDING', 'IN_FLIGHT', 'DELIVERED', 'FAILED')",
+            name="ck_edge_queue_delivery_state"),
+        Index("ix_edge_queue_edge_state_sequence", "edge_id", "delivery_state", "queue_sequence"),
+        Index("ix_edge_queue_edge_created", "edge_id", "created_at"),
+        Index("ix_edge_queue_message_id", "message_id"),
+    )
+
+    queue_sequence: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    queue_record_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), unique=True, nullable=False, default=uuid4)
+    message_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    edge_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    organization_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    building_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    observation_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    delivery_state: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING", server_default="PENDING")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_reason: Mapped[str | None] = mapped_column(String(80))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retryable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
